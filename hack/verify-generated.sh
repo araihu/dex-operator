@@ -20,6 +20,11 @@ cmp "$temporary_dir/zz_generated.deepcopy.go" "$generated_file"
 mkdir -p "$temporary_dir/crds" "$temporary_dir/rbac"
 GOWORK=off go tool controller-gen crd:crdVersions=v1 paths=./api/... output:crd:artifacts:config="$temporary_dir/crds"
 GOWORK=off go tool controller-gen rbac:roleName=manager-role paths=./... output:rbac:artifacts:config="$temporary_dir/rbac"
+(
+	cd internal/config
+	GOFILE=config.go GOLINE=19 GOWORK=off go tool envdoc -files config.go -types Config -output "$temporary_dir/configuration.md"
+)
+perl -0pi -e 's/\n+\z/\n/' "$temporary_dir/configuration.md"
 
 for name in \
 	dex.araihu.com_dexconnectors.yaml \
@@ -28,3 +33,4 @@ for name in \
 	cmp "$temporary_dir/crds/$name" "$repository_dir/config/crd/bases/$name"
 done
 cmp "$temporary_dir/rbac/role.yaml" "$repository_dir/config/rbac/role.yaml"
+cmp "$temporary_dir/configuration.md" "$repository_dir/docs/configuration.md"
