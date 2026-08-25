@@ -39,7 +39,7 @@ import (
 
 func TestHarnessCompatibility(t *testing.T) {
 	harness := startDexHarness(t, memoryStorage)
-	_ = startKubernetesHarness(t)
+	_ = startKubernetesHarness(t, harness)
 	runtimeConfig := harness.clientConfig("dex.test")
 	client, err := dexclient.NewClient(runtimeConfig, harness.clientTLS)
 	if err != nil {
@@ -393,10 +393,11 @@ func writeFile(t *testing.T, directory, name string, contents []byte) string {
 }
 
 type kubernetesHarness struct {
-	client client.Client
+	client    client.Client
+	dexClient *dexclient.Client
 }
 
-func startKubernetesHarness(t *testing.T) *kubernetesHarness {
+func startKubernetesHarness(t *testing.T, dexHarness *dexHarness) *kubernetesHarness {
 	t.Helper()
 	repository := repositoryRoot(t)
 	assets := envtestAssets(t, repository)
@@ -429,6 +430,14 @@ func startKubernetesHarness(t *testing.T) *kubernetesHarness {
 	if err := controller.RegisterSecretIndexes(context.Background(), manager.GetFieldIndexer()); err != nil {
 		t.Fatal(err)
 	}
+	runtimeConfig := dexHarness.clientConfig("dex.test")
+	runtimeConfig.ReconcileInterval = 200 * time.Millisecond
+	dexAPI, err := dexclient.NewClient(runtimeConfig, dexHarness.clientTLS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dexAPI.Close() })
+	compatibilityGate := dexclient.NewCompatibilityGate(dexAPI, config.SupportedServerVersion)
 	for name, setup := range map[string]func() error{
 		"local user": func() error {
 			return (&controller.DexLocalUserReconciler{Client: manager.GetClient(), Scheme: scheme}).SetupWithManager(manager)
@@ -437,7 +446,13 @@ func startKubernetesHarness(t *testing.T) *kubernetesHarness {
 			return (&controller.DexOAuth2ClientReconciler{Client: manager.GetClient(), Scheme: scheme}).SetupWithManager(manager)
 		},
 		"connector": func() error {
-			return (&controller.DexConnectorReconciler{Client: manager.GetClient(), Scheme: scheme}).SetupWithManager(manager)
+			return (&controller.DexConnectorReconciler{
+				Client:            manager.GetClient(),
+				Scheme:            scheme,
+				Dex:               dexAPI,
+				CompatibilityGate: compatibilityGate,
+				ReconcileInterval: runtimeConfig.ReconcileInterval,
+			}).SetupWithManager(manager)
 		},
 	} {
 		if err := setup(); err != nil {
@@ -457,7 +472,7 @@ func startKubernetesHarness(t *testing.T) *kubernetesHarness {
 			t.Errorf("stop controller manager: %v", err)
 		}
 	})
-	return &kubernetesHarness{client: manager.GetClient()}
+	return &kubernetesHarness{client: manager.GetClient(), dexClient: dexAPI}
 }
 
 func repositoryRoot(t *testing.T) string {

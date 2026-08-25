@@ -197,6 +197,10 @@ func main() {
 		setupLog.Error(err, "Failed to start manager")
 		os.Exit(1)
 	}
+	if err := controller.RegisterSecretIndexes(context.Background(), mgr.GetFieldIndexer()); err != nil {
+		setupLog.Error(err, "Failed to register Secret indexes")
+		os.Exit(1)
+	}
 
 	if err := (&controller.DexLocalUserReconciler{
 		Client: mgr.GetClient(),
@@ -213,8 +217,11 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&controller.DexConnectorReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		Dex:               dexClient,
+		CompatibilityGate: compatibilityGate,
+		ReconcileInterval: runtimeConfig.ReconcileInterval,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "dexconnector")
 		os.Exit(1)

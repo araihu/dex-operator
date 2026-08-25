@@ -110,8 +110,9 @@ type DexOAuth2ClientStatus struct {
 type DexOAuth2Client struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitzero"`
-	Spec              DexOAuth2ClientSpec   `json:"spec"`
-	Status            DexOAuth2ClientStatus `json:"status,omitzero"`
+	Spec              DexOAuth2ClientSpec `json:"spec"`
+	// +optional
+	Status DexOAuth2ClientStatus `json:"status,omitzero"`
 }
 
 // +kubebuilder:object:root=true

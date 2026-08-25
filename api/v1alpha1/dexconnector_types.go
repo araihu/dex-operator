@@ -74,8 +74,9 @@ type DexConnectorStatus struct {
 type DexConnector struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitzero"`
-	Spec              DexConnectorSpec   `json:"spec"`
-	Status            DexConnectorStatus `json:"status,omitzero"`
+	Spec              DexConnectorSpec `json:"spec"`
+	// +optional
+	Status DexConnectorStatus `json:"status,omitzero"`
 }
 
 // +kubebuilder:object:root=true

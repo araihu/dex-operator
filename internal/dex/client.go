@@ -88,6 +88,39 @@ func (client *Client) ListConnectors(ctx context.Context) (*dexapi.ListConnector
 	return response, probeError(connectorsCapability, connectorsDisabledMessage, err)
 }
 
+// CreateConnector creates a dynamic Dex connector and reports an ID collision.
+func (client *Client) CreateConnector(ctx context.Context, connector *dexapi.Connector) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
+	response, err := client.api.CreateConnector(ctx, &dexapi.CreateConnectorReq{Connector: connector})
+	if err != nil {
+		return false, operationError("create connector", err)
+	}
+	return response.GetAlreadyExists(), nil
+}
+
+// UpdateConnector updates selected dynamic connector fields and reports remote absence.
+func (client *Client) UpdateConnector(ctx context.Context, request *dexapi.UpdateConnectorReq) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
+	response, err := client.api.UpdateConnector(ctx, request)
+	if err != nil {
+		return false, operationError("update connector", err)
+	}
+	return response.GetNotFound(), nil
+}
+
+// DeleteConnector deletes a dynamic connector and reports remote absence.
+func (client *Client) DeleteConnector(ctx context.Context, id string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
+	response, err := client.api.DeleteConnector(ctx, &dexapi.DeleteConnectorReq{Id: id})
+	if err != nil {
+		return false, operationError("delete connector", err)
+	}
+	return response.GetNotFound(), nil
+}
+
 // ListUserIdentities returns Dex user identities.
 func (client *Client) ListUserIdentities(ctx context.Context) (*dexapi.ListUserIdentitiesResp, error) {
 	ctx, cancel := context.WithTimeout(ctx, rpcTimeout)

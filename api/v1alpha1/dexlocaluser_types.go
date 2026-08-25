@@ -180,8 +180,9 @@ type DexLocalUserStatus struct {
 type DexLocalUser struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitzero"`
-	Spec              DexLocalUserSpec   `json:"spec"`
-	Status            DexLocalUserStatus `json:"status,omitzero"`
+	Spec              DexLocalUserSpec `json:"spec"`
+	// +optional
+	Status DexLocalUserStatus `json:"status,omitzero"`
 }
 
 // +kubebuilder:object:root=true
