@@ -440,7 +440,13 @@ func startKubernetesHarness(t *testing.T, dexHarness *dexHarness) *kubernetesHar
 	compatibilityGate := dexclient.NewCompatibilityGate(dexAPI, config.SupportedServerVersion)
 	for name, setup := range map[string]func() error{
 		"local user": func() error {
-			return (&controller.DexLocalUserReconciler{Client: manager.GetClient(), Scheme: scheme}).SetupWithManager(manager)
+			return (&controller.DexLocalUserReconciler{
+				Client:            manager.GetClient(),
+				Scheme:            scheme,
+				Dex:               dexAPI,
+				CompatibilityGate: compatibilityGate,
+				ReconcileInterval: runtimeConfig.ReconcileInterval,
+			}).SetupWithManager(manager)
 		},
 		"OAuth2 client": func() error {
 			return (&controller.DexOAuth2ClientReconciler{

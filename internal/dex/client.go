@@ -177,6 +177,69 @@ func (client *Client) ListUserIdentities(ctx context.Context) (*dexapi.ListUserI
 	return response, probeError(identitiesCapability, identitiesDisabledMessage, err)
 }
 
+// ListPasswords returns local password records without hashes, as enforced by Dex.
+func (client *Client) ListPasswords(ctx context.Context) (*dexapi.ListPasswordResp, error) {
+	ctx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
+	response, err := client.api.ListPasswords(ctx, &dexapi.ListPasswordReq{})
+	return response, operationError("list passwords", err)
+}
+
+// CreatePassword creates a Dex local password record and reports an email collision.
+func (client *Client) CreatePassword(ctx context.Context, password *dexapi.Password) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
+	response, err := client.api.CreatePassword(ctx, &dexapi.CreatePasswordReq{Password: password})
+	if err != nil {
+		return false, operationError("create password", err)
+	}
+	return response.GetAlreadyExists(), nil
+}
+
+// UpdatePassword updates a Dex password hash or username and reports remote absence.
+func (client *Client) UpdatePassword(ctx context.Context, request *dexapi.UpdatePasswordReq) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
+	response, err := client.api.UpdatePassword(ctx, request)
+	if err != nil {
+		return false, operationError("update password", err)
+	}
+	return response.GetNotFound(), nil
+}
+
+// DeletePassword deletes a Dex password record and reports remote absence.
+func (client *Client) DeletePassword(ctx context.Context, email string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
+	response, err := client.api.DeletePassword(ctx, &dexapi.DeletePasswordReq{Email: email})
+	if err != nil {
+		return false, operationError("delete password", err)
+	}
+	return response.GetNotFound(), nil
+}
+
+// VerifyPassword checks plaintext in memory against Dex and reports remote absence.
+func (client *Client) VerifyPassword(ctx context.Context, email, password string) (bool, bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
+	response, err := client.api.VerifyPassword(ctx, &dexapi.VerifyPasswordReq{Email: email, Password: password})
+	if err != nil {
+		return false, false, operationError("verify password", err)
+	}
+	return response.GetVerified(), !response.GetNotFound(), nil
+}
+
+// DeleteUserIdentity purges one connector identity and reports remote absence.
+func (client *Client) DeleteUserIdentity(ctx context.Context, userID, connectorID string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
+	response, err := client.api.DeleteUserIdentity(ctx, &dexapi.DeleteUserIdentityReq{UserId: userID, ConnectorId: connectorID})
+	if err != nil {
+		return false, operationError("delete user identity", err)
+	}
+	return response.GetNotFound(), nil
+}
+
 func loadTLSCredentials(serverName string, files TLSFiles) (credentials.TransportCredentials, error) {
 	caPEM, err := os.ReadFile(files.CA)
 	if err != nil {

@@ -203,8 +203,11 @@ func main() {
 	}
 
 	if err := (&controller.DexLocalUserReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		Dex:               dexClient,
+		CompatibilityGate: compatibilityGate,
+		ReconcileInterval: runtimeConfig.ReconcileInterval,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "dexlocaluser")
 		os.Exit(1)

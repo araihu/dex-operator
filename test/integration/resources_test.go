@@ -12,8 +12,10 @@ import (
 
 	dexv1alpha1 "github.com/araihu/dex-operator/api/v1alpha1"
 	"github.com/araihu/dex-operator/internal/controller"
+	"github.com/araihu/dex-operator/internal/credentials"
 	dexclient "github.com/araihu/dex-operator/internal/dex"
 	dexapi "github.com/dexidp/dex/api/v2"
+	"golang.org/x/crypto/bcrypt"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -21,6 +23,208 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+func TestDexLocalUser(t *testing.T) {
+	dexHarness := startDexHarness(t, memoryStorage)
+	harness := startKubernetesHarness(t, dexHarness)
+	ctx := context.Background()
+
+	t.Run("derived ID and provided hash lifecycle", func(t *testing.T) {
+		hashOne := mustBcryptHash(t, "provided-password-one")
+		secret := mustCreateOpaqueSecret(t, ctx, harness.client, "provided-user-hash", map[string][]byte{"bcryptHash": hashOne})
+		resource := newProvidedLocalUser("provided-user", "provided@example.com", secret.Name)
+		mustCreate(t, ctx, harness.client, resource)
+		managed := awaitReadyLocalUser(t, ctx, harness.client, resource.Name)
+		expectedID := credentials.LocalUserID("default", resource.Name)
+		if managed.Status.ResolvedUserID != expectedID {
+			t.Fatalf("resolved user ID = %q, want %q", managed.Status.ResolvedUserID, expectedID)
+		}
+		assertRemotePassword(t, ctx, harness, resource.Spec.Email, resource.Spec.Username, expectedID)
+		assertPasswordVerification(t, ctx, harness, resource.Spec.Email, "provided-password-one", true)
+
+		hashTwo := mustBcryptHash(t, "provided-password-two")
+		secret = getSecret(t, ctx, harness.client, secret.Name)
+		secret.Data["bcryptHash"] = hashTwo
+		mustUpdate(t, ctx, harness.client, secret)
+		awaitLocalUserSecretResourceVersion(t, ctx, harness.client, resource.Name, secret.ResourceVersion)
+		assertPasswordVerification(t, ctx, harness, resource.Spec.Email, "provided-password-two", true)
+
+		if notFound, err := harness.dexClient.UpdatePassword(ctx, &dexapi.UpdatePasswordReq{Email: resource.Spec.Email, NewUsername: "Drifted Username"}); err != nil || notFound {
+			t.Fatalf("inject username drift: notFound=%t err=%v", notFound, err)
+		}
+		awaitRemotePassword(t, ctx, harness, resource.Spec.Email, func(observed *dexapi.Password) bool {
+			return observed.GetUsername() == resource.Spec.Username && observed.GetUserId() == expectedID
+		})
+
+		if _, err := harness.dexClient.DeletePassword(ctx, resource.Spec.Email); err != nil {
+			t.Fatal(err)
+		}
+		if alreadyExists, err := harness.dexClient.CreatePassword(ctx, &dexapi.Password{Email: resource.Spec.Email, Username: resource.Spec.Username, UserId: "drifted-user-id", Hash: hashTwo}); err != nil || alreadyExists {
+			t.Fatalf("inject user ID drift: alreadyExists=%t err=%v", alreadyExists, err)
+		}
+		awaitRemotePassword(t, ctx, harness, resource.Spec.Email, func(observed *dexapi.Password) bool {
+			return observed.GetUserId() == expectedID
+		})
+		assertPasswordVerification(t, ctx, harness, resource.Spec.Email, "provided-password-two", true)
+
+		if _, err := harness.dexClient.DeletePassword(ctx, resource.Spec.Email); err != nil {
+			t.Fatal(err)
+		}
+		awaitRemotePassword(t, ctx, harness, resource.Spec.Email, func(observed *dexapi.Password) bool {
+			return observed.GetUserId() == expectedID
+		})
+
+		managed = getLocalUser(t, ctx, harness.client, resource.Name)
+		mustDelete(t, ctx, harness.client, managed)
+		awaitLocalUserDeletion(t, ctx, harness.client, resource.Name)
+		awaitRemotePasswordAbsence(t, ctx, harness, resource.Spec.Email)
+		if getSecretIfPresent(t, ctx, harness.client, secret.Name) == nil {
+			t.Fatal("provided password Secret was deleted")
+		}
+	})
+
+	t.Run("generated password lifecycle", func(t *testing.T) {
+		resource := newGeneratedLocalUser("generated-user", "generated@example.com", "explicit-user-id", "generated-user-secret")
+		mustCreate(t, ctx, harness.client, resource)
+		managed := awaitReadyLocalUser(t, ctx, harness.client, resource.Name)
+		if managed.Status.ResolvedUserID != resource.Spec.UserID {
+			t.Fatalf("resolved explicit user ID = %q", managed.Status.ResolvedUserID)
+		}
+		generated := awaitSecret(t, ctx, harness.client, resource.Spec.Password.Generated.SecretName)
+		password := string(generated.Data["password"])
+		if len(password) != 20 || bcrypt.CompareHashAndPassword(generated.Data["bcryptHash"], []byte(password)) != nil {
+			t.Fatal("generated password Secret is internally inconsistent")
+		}
+		if owner := metav1.GetControllerOf(generated); owner == nil || owner.UID != managed.UID {
+			t.Fatalf("generated password Secret controller owner = %#v", owner)
+		}
+		assertRemotePassword(t, ctx, harness, resource.Spec.Email, resource.Spec.Username, resource.Spec.UserID)
+		assertPasswordVerification(t, ctx, harness, resource.Spec.Email, password, true)
+
+		readyBefore := meta.FindStatusCondition(managed.Status.Conditions, dexv1alpha1.ConditionReady).LastTransitionTime
+		time.Sleep(600 * time.Millisecond)
+		managed = getLocalUser(t, ctx, harness.client, resource.Name)
+		readyAfter := meta.FindStatusCondition(managed.Status.Conditions, dexv1alpha1.ConditionReady).LastTransitionTime
+		if !readyAfter.Equal(&readyBefore) {
+			t.Fatalf("no-op reconciliation changed Ready transition: %s -> %s", readyBefore, readyAfter)
+		}
+
+		previousGeneration := managed.Generation
+		managed.Spec.Password.Generated.Length = 30
+		mustUpdate(t, ctx, harness.client, managed)
+		managed = awaitReadyLocalUserAfter(t, ctx, harness.client, resource.Name, previousGeneration)
+		unchanged := awaitSecret(t, ctx, harness.client, resource.Spec.Password.Generated.SecretName)
+		if string(unchanged.Data["password"]) != password {
+			t.Fatal("generated policy change rotated password without a nonce")
+		}
+
+		driftHash := mustBcryptHash(t, "out-of-band-password")
+		if notFound, err := harness.dexClient.UpdatePassword(ctx, &dexapi.UpdatePasswordReq{Email: resource.Spec.Email, NewHash: driftHash}); err != nil || notFound {
+			t.Fatalf("inject password drift: notFound=%t err=%v", notFound, err)
+		}
+		awaitPasswordVerification(t, ctx, harness, resource.Spec.Email, password, true)
+
+		if _, err := harness.dexClient.DeletePassword(ctx, resource.Spec.Email); err != nil {
+			t.Fatal(err)
+		}
+		awaitRemotePassword(t, ctx, harness, resource.Spec.Email, func(observed *dexapi.Password) bool {
+			return observed.GetUserId() == resource.Spec.UserID
+		})
+		assertPasswordVerification(t, ctx, harness, resource.Spec.Email, password, true)
+
+		generated = awaitSecret(t, ctx, harness.client, resource.Spec.Password.Generated.SecretName)
+		manualPassword := "manually-edited-password"
+		generated.Data["password"] = []byte(manualPassword)
+		generated.Data["bcryptHash"] = mustBcryptHash(t, manualPassword)
+		mustUpdate(t, ctx, harness.client, generated)
+		awaitLocalUserCondition(t, ctx, harness.client, resource.Name, metav1.ConditionFalse, controller.ReasonConflict)
+		assertPasswordVerification(t, ctx, harness, resource.Spec.Email, password, true)
+
+		managed = getLocalUser(t, ctx, harness.client, resource.Name)
+		previousGeneration = managed.Generation
+		managed.Spec.Password.Generated.RotationNonce = "rotation-1"
+		mustUpdate(t, ctx, harness.client, managed)
+		managed = awaitReadyLocalUserAfter(t, ctx, harness.client, resource.Name, previousGeneration)
+		rotated := awaitSecret(t, ctx, harness.client, resource.Spec.Password.Generated.SecretName)
+		rotatedPassword := string(rotated.Data["password"])
+		if len(rotatedPassword) != 30 || rotatedPassword == manualPassword || rotatedPassword == password {
+			t.Fatal("generated password rotation did not produce fresh policy-compliant material")
+		}
+		assertPasswordVerification(t, ctx, harness, resource.Spec.Email, rotatedPassword, true)
+
+		oldUID := rotated.UID
+		mustDelete(t, ctx, harness.client, rotated)
+		awaitLocalUserCondition(t, ctx, harness.client, resource.Name, metav1.ConditionFalse, controller.ReasonConflict)
+		if getSecretIfPresent(t, ctx, harness.client, resource.Spec.Password.Generated.SecretName) != nil {
+			t.Fatal("lost generated password Secret was recreated without a rotation nonce")
+		}
+		managed = getLocalUser(t, ctx, harness.client, resource.Name)
+		previousGeneration = managed.Generation
+		managed.Spec.Password.Generated.RotationNonce = "rotation-2"
+		mustUpdate(t, ctx, harness.client, managed)
+		managed = awaitReadyLocalUserAfter(t, ctx, harness.client, resource.Name, previousGeneration)
+		recovered := awaitSecretUIDChange(t, ctx, harness.client, resource.Spec.Password.Generated.SecretName, oldUID)
+		recoveredPassword := string(recovered.Data["password"])
+		if len(recoveredPassword) != 30 || recoveredPassword == rotatedPassword {
+			t.Fatal("nonce-authorized lost Secret recovery did not generate fresh material")
+		}
+		assertPasswordVerification(t, ctx, harness, resource.Spec.Email, recoveredPassword, true)
+
+		mustDelete(t, ctx, harness.client, managed)
+		awaitLocalUserDeletion(t, ctx, harness.client, resource.Name)
+		awaitRemotePasswordAbsence(t, ctx, harness, resource.Spec.Email)
+		awaitSecretAbsence(t, ctx, harness.client, resource.Spec.Password.Generated.SecretName)
+	})
+
+	t.Run("adoption requires matching resolved user ID", func(t *testing.T) {
+		const observedID = "existing-subject"
+		hash := mustBcryptHash(t, "adopted-password")
+		if alreadyExists, err := harness.dexClient.CreatePassword(ctx, &dexapi.Password{Email: "adopted@example.com", Username: "Existing", UserId: observedID, Hash: hash}); err != nil || alreadyExists {
+			t.Fatalf("create existing password: alreadyExists=%t err=%v", alreadyExists, err)
+		}
+		secret := mustCreateOpaqueSecret(t, ctx, harness.client, "adopted-user-hash", map[string][]byte{"bcryptHash": hash})
+		resource := newProvidedLocalUser("adopted-user", "adopted@example.com", secret.Name)
+		mustCreate(t, ctx, harness.client, resource)
+		conflicted := awaitLocalUserCondition(t, ctx, harness.client, resource.Name, metav1.ConditionFalse, controller.ReasonConflict)
+		if conflicted.Status.ResolvedUserID != "" {
+			t.Fatalf("conflicted resource claimed user ID %q", conflicted.Status.ResolvedUserID)
+		}
+
+		previousGeneration := conflicted.Generation
+		conflicted.Spec.AdoptExisting = true
+		mustUpdate(t, ctx, harness.client, conflicted)
+		conflicted = awaitLocalUserConditionAfter(t, ctx, harness.client, resource.Name, previousGeneration, metav1.ConditionFalse, controller.ReasonConflict)
+		if conflicted.Status.ResolvedUserID != "" {
+			t.Fatalf("mismatched adoption claimed user ID %q", conflicted.Status.ResolvedUserID)
+		}
+
+		previousGeneration = conflicted.Generation
+		conflicted.Spec.UserID = observedID
+		mustUpdate(t, ctx, harness.client, conflicted)
+		adopted := awaitReadyLocalUserAfter(t, ctx, harness.client, resource.Name, previousGeneration)
+		assertRemotePassword(t, ctx, harness, resource.Spec.Email, resource.Spec.Username, observedID)
+		mustDelete(t, ctx, harness.client, adopted)
+		awaitLocalUserDeletion(t, ctx, harness.client, resource.Name)
+		awaitRemotePasswordAbsence(t, ctx, harness, resource.Spec.Email)
+	})
+
+	t.Run("Retain detaches generated Secret", func(t *testing.T) {
+		resource := newGeneratedLocalUser("retained-user", "retained@example.com", "retained-subject", "retained-user-secret")
+		resource.Spec.DeletionPolicy = dexv1alpha1.DeletionPolicyRetain
+		mustCreate(t, ctx, harness.client, resource)
+		managed := awaitReadyLocalUser(t, ctx, harness.client, resource.Name)
+		mustDelete(t, ctx, harness.client, managed)
+		awaitLocalUserDeletion(t, ctx, harness.client, resource.Name)
+		retainedSecret := awaitSecret(t, ctx, harness.client, resource.Spec.Password.Generated.SecretName)
+		if metav1.GetControllerOf(retainedSecret) != nil {
+			t.Fatalf("retained password Secret still has a controller: %#v", retainedSecret.OwnerReferences)
+		}
+		if remotePassword(t, ctx, harness, resource.Spec.Email) == nil {
+			t.Fatal("Retain deleted the remote password")
+		}
+		_, _ = harness.dexClient.DeletePassword(ctx, resource.Spec.Email)
+	})
+}
 
 func TestDexOAuth2Client(t *testing.T) {
 	dexHarness := startDexHarness(t, memoryStorage)
@@ -806,5 +1010,181 @@ func awaitSecretAbsence(t *testing.T, ctx context.Context, kube client.Client, n
 	eventually(t, func() (bool, error) {
 		err := kube.Get(ctx, types.NamespacedName{Namespace: "default", Name: name}, &corev1.Secret{})
 		return apierrors.IsNotFound(err), ignoreNotFound(err)
+	})
+}
+
+func newProvidedLocalUser(name, email, secretName string) *dexv1alpha1.DexLocalUser {
+	return &dexv1alpha1.DexLocalUser{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		Spec: dexv1alpha1.DexLocalUserSpec{
+			Email:    email,
+			Username: "Managed User",
+			Password: dexv1alpha1.DexLocalUserPasswordSpec{HashSecretRef: &dexv1alpha1.SecretKeyReference{Name: secretName, Key: "bcryptHash"}},
+		},
+	}
+}
+
+func newGeneratedLocalUser(name, email, userID, secretName string) *dexv1alpha1.DexLocalUser {
+	return &dexv1alpha1.DexLocalUser{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		Spec: dexv1alpha1.DexLocalUserSpec{
+			Email:    email,
+			Username: "Managed User",
+			UserID:   userID,
+			Password: dexv1alpha1.DexLocalUserPasswordSpec{Generated: &dexv1alpha1.GeneratedPasswordSpec{
+				SecretName:    secretName,
+				Length:        20,
+				CharacterSets: []dexv1alpha1.PasswordCharacterSet{dexv1alpha1.PasswordCharacterSetLetters, dexv1alpha1.PasswordCharacterSetNumbers},
+			}},
+		},
+	}
+}
+
+func mustBcryptHash(t *testing.T, password string) []byte {
+	t.Helper()
+	hash, err := credentials.BcryptHash(password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return hash
+}
+
+func getLocalUser(t *testing.T, ctx context.Context, kube client.Client, name string) *dexv1alpha1.DexLocalUser {
+	t.Helper()
+	resource := &dexv1alpha1.DexLocalUser{}
+	if err := kube.Get(ctx, types.NamespacedName{Namespace: "default", Name: name}, resource); err != nil {
+		t.Fatal(err)
+	}
+	return resource
+}
+
+func awaitReadyLocalUser(t *testing.T, ctx context.Context, kube client.Client, name string) *dexv1alpha1.DexLocalUser {
+	t.Helper()
+	return awaitLocalUserCondition(t, ctx, kube, name, metav1.ConditionTrue, controller.ReasonConverged)
+}
+
+func awaitReadyLocalUserAfter(t *testing.T, ctx context.Context, kube client.Client, name string, generation int64) *dexv1alpha1.DexLocalUser {
+	t.Helper()
+	return awaitLocalUserConditionAfter(t, ctx, kube, name, generation, metav1.ConditionTrue, controller.ReasonConverged)
+}
+
+func awaitLocalUserCondition(t *testing.T, ctx context.Context, kube client.Client, name string, status metav1.ConditionStatus, reason string) *dexv1alpha1.DexLocalUser {
+	t.Helper()
+	return awaitLocalUserConditionAfter(t, ctx, kube, name, -1, status, reason)
+}
+
+func awaitLocalUserConditionAfter(t *testing.T, ctx context.Context, kube client.Client, name string, generation int64, status metav1.ConditionStatus, reason string) *dexv1alpha1.DexLocalUser {
+	t.Helper()
+	var result *dexv1alpha1.DexLocalUser
+	eventually(t, func() (bool, error) {
+		resource := &dexv1alpha1.DexLocalUser{}
+		if err := kube.Get(ctx, types.NamespacedName{Namespace: "default", Name: name}, resource); err != nil {
+			return false, err
+		}
+		condition := meta.FindStatusCondition(resource.Status.Conditions, dexv1alpha1.ConditionReady)
+		if resource.Generation > generation && condition != nil && condition.ObservedGeneration == resource.Generation && condition.Status == status && condition.Reason == reason {
+			result = resource
+			return true, nil
+		}
+		return false, nil
+	})
+	return result
+}
+
+func awaitLocalUserSecretResourceVersion(t *testing.T, ctx context.Context, kube client.Client, name, resourceVersion string) {
+	t.Helper()
+	eventually(t, func() (bool, error) {
+		resource := &dexv1alpha1.DexLocalUser{}
+		if err := kube.Get(ctx, types.NamespacedName{Namespace: "default", Name: name}, resource); err != nil {
+			return false, err
+		}
+		return resource.Status.AppliedSecretResourceVersion == resourceVersion, nil
+	})
+}
+
+func awaitLocalUserDeletion(t *testing.T, ctx context.Context, kube client.Client, name string) {
+	t.Helper()
+	eventually(t, func() (bool, error) {
+		err := kube.Get(ctx, types.NamespacedName{Namespace: "default", Name: name}, &dexv1alpha1.DexLocalUser{})
+		return apierrors.IsNotFound(err), ignoreNotFound(err)
+	})
+}
+
+func remotePassword(t *testing.T, ctx context.Context, harness *kubernetesHarness, email string) *dexapi.Password {
+	t.Helper()
+	response, err := harness.dexClient.ListPasswords(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, password := range response.GetPasswords() {
+		if password.GetEmail() == email {
+			return password
+		}
+	}
+	return nil
+}
+
+func assertRemotePassword(t *testing.T, ctx context.Context, harness *kubernetesHarness, email, username, userID string) {
+	t.Helper()
+	observed := remotePassword(t, ctx, harness, email)
+	if observed == nil {
+		t.Fatalf("remote password %q is absent", email)
+	}
+	if observed.GetUsername() != username || observed.GetUserId() != userID {
+		t.Fatalf("remote password identity mismatch: username=%q userID=%q", observed.GetUsername(), observed.GetUserId())
+	}
+	if len(observed.GetHash()) != 0 {
+		t.Fatal("ListPasswords unexpectedly exposed a hash")
+	}
+}
+
+func awaitRemotePassword(t *testing.T, ctx context.Context, harness *kubernetesHarness, email string, check func(*dexapi.Password) bool) {
+	t.Helper()
+	eventually(t, func() (bool, error) {
+		response, err := harness.dexClient.ListPasswords(ctx)
+		if err != nil {
+			return false, err
+		}
+		for _, password := range response.GetPasswords() {
+			if password.GetEmail() == email {
+				return check(password), nil
+			}
+		}
+		return false, nil
+	})
+}
+
+func awaitRemotePasswordAbsence(t *testing.T, ctx context.Context, harness *kubernetesHarness, email string) {
+	t.Helper()
+	eventually(t, func() (bool, error) {
+		response, err := harness.dexClient.ListPasswords(ctx)
+		if err != nil {
+			return false, err
+		}
+		for _, password := range response.GetPasswords() {
+			if password.GetEmail() == email {
+				return false, nil
+			}
+		}
+		return true, nil
+	})
+}
+
+func assertPasswordVerification(t *testing.T, ctx context.Context, harness *kubernetesHarness, email, password string, want bool) {
+	t.Helper()
+	verified, found, err := harness.dexClient.VerifyPassword(ctx, email, password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || verified != want {
+		t.Fatalf("password verification = verified=%t found=%t, want verified=%t found=true", verified, found, want)
+	}
+}
+
+func awaitPasswordVerification(t *testing.T, ctx context.Context, harness *kubernetesHarness, email, password string, want bool) {
+	t.Helper()
+	eventually(t, func() (bool, error) {
+		verified, found, err := harness.dexClient.VerifyPassword(ctx, email, password)
+		return found && verified == want, err
 	})
 }
