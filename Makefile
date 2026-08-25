@@ -1,4 +1,4 @@
-.PHONY: generate verify-generated test envtest test-integration race build verify
+.PHONY: generate verify-generated test envtest build-test-dex test-integration race build verify
 
 ENVTEST_CACHE ?= .cache/envtest
 
@@ -15,7 +15,10 @@ envtest:
 	mkdir -p "$(ENVTEST_CACHE)"
 	KUBEBUILDER_ASSETS="$$(GOWORK=off go tool setup-envtest --bin-dir "$(ENVTEST_CACHE)" use 1.36.x -p path)" GOWORK=off go test ./internal/controller -count=1
 
-test-integration:
+build-test-dex:
+	./hack/build-test-dex.sh
+
+test-integration: build-test-dex
 	GOWORK=off go test -tags=integration ./test/integration -count=1 -v
 
 race:
