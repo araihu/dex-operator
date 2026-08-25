@@ -2,10 +2,12 @@
 package dex
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/araihu/dex-operator/internal/config"
 	dexapi "github.com/dexidp/dex/api/v2"
@@ -20,6 +22,7 @@ const (
 	productionCAFile   = "/var/run/dex-operator/tls/ca.crt"
 	productionCertFile = "/var/run/dex-operator/tls/tls.crt"
 	productionKeyFile  = "/var/run/dex-operator/tls/tls.key"
+	rpcTimeout         = 10 * time.Second
 )
 
 // TLSFiles identifies cert-manager-shaped client TLS files.
@@ -67,6 +70,30 @@ func NewClient(runtimeConfig config.Config, files TLSFiles) (*Client, error) {
 // Close closes the underlying gRPC connection.
 func (client *Client) Close() error {
 	return client.connection.Close()
+}
+
+// GetVersion returns Dex's server and API versions.
+func (client *Client) GetVersion(ctx context.Context) (*dexapi.VersionResp, error) {
+	ctx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
+	response, err := client.api.GetVersion(ctx, &dexapi.VersionReq{})
+	return response, operationError("get version", err)
+}
+
+// ListConnectors returns dynamically stored Dex connectors.
+func (client *Client) ListConnectors(ctx context.Context) (*dexapi.ListConnectorResp, error) {
+	ctx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
+	response, err := client.api.ListConnectors(ctx, &dexapi.ListConnectorReq{})
+	return response, probeError(connectorsCapability, connectorsDisabledMessage, err)
+}
+
+// ListUserIdentities returns Dex user identities.
+func (client *Client) ListUserIdentities(ctx context.Context) (*dexapi.ListUserIdentitiesResp, error) {
+	ctx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
+	response, err := client.api.ListUserIdentities(ctx, &dexapi.ListUserIdentitiesReq{})
+	return response, probeError(identitiesCapability, identitiesDisabledMessage, err)
 }
 
 func loadTLSCredentials(serverName string, files TLSFiles) (credentials.TransportCredentials, error) {

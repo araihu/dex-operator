@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"os"
@@ -36,7 +37,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	dexv1alpha1 "github.com/araihu/dex-operator/api/v1alpha1"
+	"github.com/araihu/dex-operator/internal/config"
 	"github.com/araihu/dex-operator/internal/controller"
+	dexclient "github.com/araihu/dex-operator/internal/dex"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -86,6 +89,23 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	runtimeConfig, err := config.Load()
+	if err != nil {
+		setupLog.Error(err, "Invalid runtime configuration")
+		os.Exit(1)
+	}
+	dexClient, err := dexclient.NewClient(runtimeConfig, dexclient.ProductionTLSFiles())
+	if err != nil {
+		setupLog.Error(err, "Failed to create Dex client")
+		os.Exit(1)
+	}
+	defer func() {
+		if err := dexClient.Close(); err != nil {
+			setupLog.Error(err, "Failed to close Dex client")
+		}
+	}()
+	compatibilityGate := dexclient.NewCompatibilityGate(dexClient, runtimeConfig.ExpectedServerVersion)
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
@@ -205,11 +225,13 @@ func main() {
 		setupLog.Error(err, "Failed to set up health check")
 		os.Exit(1)
 	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+	if err := mgr.AddReadyzCheck("readyz", compatibilityGate.ReadinessCheck); err != nil {
 		setupLog.Error(err, "Failed to set up ready check")
 		os.Exit(1)
 	}
 
+	compatibility := compatibilityGate.Check(context.Background())
+	setupLog.Info("Dex compatibility check", "state", compatibility.State, "reason", compatibility.Reason)
 	setupLog.Info("Starting manager")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "Failed to run manager")
