@@ -226,13 +226,17 @@ func startDexHarness(t *testing.T, storage dexStorage) *dexHarness {
 }
 
 func startDexHarnessWithFeatures(t *testing.T, storage dexStorage, connectorsCRUD, identitiesCRUD bool) *dexHarness {
+	return startDexHarnessConfigured(t, storage, connectorsCRUD, identitiesCRUD, nil)
+}
+
+func startDexHarnessConfigured(t *testing.T, storage dexStorage, connectorsCRUD, identitiesCRUD bool, mfaChain []string) *dexHarness {
 	t.Helper()
 	ensureDockerHost(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	tlsFiles := writeHarnessTLS(t)
 	configPath := filepath.Join(t.TempDir(), "dex.yaml")
-	if err := os.WriteFile(configPath, []byte(dexConfiguration(storage)), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte(dexConfiguration(storage, mfaChain)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -245,6 +249,7 @@ func startDexHarnessWithFeatures(t *testing.T, storage dexStorage, connectorsCRU
 		testcontainers.WithEnv(map[string]string{
 			"DEX_API_CONNECTORS_CRUD":          strconv.FormatBool(connectorsCRUD),
 			"DEX_API_SESSIONS_IDENTITIES_CRUD": strconv.FormatBool(identitiesCRUD),
+			"DEX_SESSIONS_ENABLED":             strconv.FormatBool(len(mfaChain) > 0),
 		}),
 		testcontainers.WithExposedPorts("5556/tcp", "5557/tcp"),
 		testcontainers.WithFiles(
@@ -255,7 +260,7 @@ func startDexHarnessWithFeatures(t *testing.T, storage dexStorage, connectorsCRU
 		),
 		testcontainers.WithCmd("dex", "serve", "/etc/dex/test.yaml"),
 		testcontainers.WithWaitStrategy(wait.ForListeningPort("5557/tcp").WithStartupTimeout(30 * time.Second)),
-		tcnetwork.WithNetwork([]string{"dex"}, dexNetwork),
+		tcnetwork.WithNetwork([]string{"dex", "dex.test", "client.test"}, dexNetwork),
 	}
 	volumeName := ""
 	if storage == sqliteStorage {
@@ -293,14 +298,48 @@ func startDexHarnessWithFeatures(t *testing.T, storage dexStorage, connectorsCRU
 	if err != nil {
 		t.Fatal(err)
 	}
+	webScheme := "http"
+	if len(mfaChain) > 0 {
+		webScheme = "https"
+	}
 	return &dexHarness{
 		grpcAddress: net.JoinHostPort(host, grpcPort.Port()),
-		httpURL:     "http://" + net.JoinHostPort(host, httpPort.Port()),
+		httpURL:     webScheme + "://" + net.JoinHostPort(host, httpPort.Port()),
 		clientTLS:   tlsFiles.clientTLS,
 		wrongCA:     tlsFiles.wrongCA,
 		container:   container,
 		network:     dexNetwork,
 	}
+}
+
+func startDexMFAHarness(t *testing.T, authenticatorID string) *dexHarness {
+	t.Helper()
+	return startDexHarnessConfigured(t, memoryStorage, true, true, []string{authenticatorID})
+}
+
+func startWebAuthnBrowser(t *testing.T, dexHarness *dexHarness) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	container, err := testcontainers.Run(ctx, webAuthnBrowserImage,
+		testcontainers.WithExposedPorts("9222/tcp"),
+		testcontainers.WithCmd("--ignore-certificate-errors"),
+		testcontainers.WithWaitStrategy(wait.ForHTTP("/json/version").WithPort("9222/tcp").WithStartupTimeout(30*time.Second)),
+		tcnetwork.WithNetwork([]string{"browser"}, dexHarness.network),
+	)
+	testcontainers.CleanupContainer(t, container)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, err := container.Host(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := container.MappedPort(ctx, "9222/tcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return "http://" + net.JoinHostPort(host, port.Port())
 }
 
 func freeTCPPort(t *testing.T) int {
@@ -335,17 +374,32 @@ func ensureDockerHost(t *testing.T) {
 	t.Setenv("DOCKER_HOST", host)
 }
 
-func dexConfiguration(storage dexStorage) string {
+func dexConfiguration(storage dexStorage, mfaChain []string) string {
 	storageConfig := "  type: memory\n"
 	if storage == sqliteStorage {
 		storageConfig = "  type: sqlite3\n  config:\n    file: /var/dex/dex.db\n"
 	}
-	return "issuer: http://dex:5556/dex\n" +
+	mfaConfig := ""
+	issuer := "http://dex.test:5556/dex"
+	webConfig := "web:\n  http: 0.0.0.0:5556\n"
+	if len(mfaChain) > 0 {
+		issuer = "https://dex.test:5556/dex"
+		webConfig = "web:\n  https: 0.0.0.0:5556\n  tlsCert: /etc/dex/tls.crt\n  tlsKey: /etc/dex/tls.key\n"
+		mfaConfig = "mfa:\n" +
+			"  authenticators:\n" +
+			"  - id: totp-1\n    type: TOTP\n    config:\n      issuer: Dex Operator Test\n" +
+			"  - id: webauthn-1\n    type: WebAuthn\n    config:\n      rpDisplayName: Dex Operator Test\n      rpID: dex.test\n      rpOrigins:\n      - https://dex.test:5556\n      attestationPreference: none\n      userVerification: discouraged\n      timeout: 30s\n" +
+			"  defaultMFAChain:\n"
+		for _, authenticatorID := range mfaChain {
+			mfaConfig += "  - " + authenticatorID + "\n"
+		}
+	}
+	return "issuer: " + issuer + "\n" +
 		"storage:\n" + storageConfig +
-		"web:\n  http: 0.0.0.0:5556\n" +
+		webConfig +
 		"grpc:\n  addr: 0.0.0.0:5557\n  tlsCert: /etc/dex/tls.crt\n  tlsKey: /etc/dex/tls.key\n  tlsClientCA: /etc/dex/client-ca.crt\n" +
 		"enablePasswordDB: true\n" +
-		"oauth2:\n  skipApprovalScreen: true\n" +
+		"oauth2:\n  skipApprovalScreen: true\n" + mfaConfig +
 		"staticClients:\n- id: integration-client\n  secret: integration-secret\n  name: Integration Client\n  redirectURIs:\n  - http://127.0.0.1/callback\n"
 }
 
