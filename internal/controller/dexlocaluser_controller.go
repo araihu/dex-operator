@@ -44,6 +44,8 @@ const (
 	localConnectorID                         = "local"
 	minimumDexBcryptCost                     = 10
 	maximumDexBcryptCost                     = 16
+	credentialSourceProvided                 = "Provided"
+	credentialSourceGenerated                = "Generated"
 )
 
 // DexLocalUserReconciler reconciles DexLocalUser resources through Dex's gRPC API.
@@ -106,10 +108,15 @@ func (r *DexLocalUserReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
+	credentialSource := credentialSourceProvided
+	if resource.Spec.Password.Generated != nil {
+		credentialSource = credentialSourceGenerated
+	}
+	sourceChanged := resource.Status.AppliedCredentialSource != "" && resource.Status.AppliedCredentialSource != credentialSource
 	rotationRequested := resource.Spec.Password.Generated != nil && resource.Spec.Password.Generated.RotationNonce != resource.Status.HandledRotationNonce
 	password, hash := "", providedHash
 	if resource.Spec.Password.Generated != nil {
-		password, hash, secretResourceVersion, err = r.generatedPassword(ctx, resource, rotationRequested)
+		password, hash, secretResourceVersion, err = r.generatedPassword(ctx, resource, rotationRequested, sourceChanged)
 		if err != nil {
 			return r.statusResult(ctx, resource, ReasonConflict, "Generated password Secret is missing or was modified; a new rotation nonce is required.", metav1.ConditionTrue, true, nil)
 		}
@@ -202,6 +209,7 @@ func (r *DexLocalUserReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			status.HandledRotationNonce = resource.Spec.Password.Generated.RotationNonce
 		}
 		status.AppliedSecretResourceVersion = secretResourceVersion
+		status.AppliedCredentialSource = credentialSource
 		status.HandledMFAResetNonce = handledMFAResetNonce
 		status.MFADevices = mfaDevices
 		status.ObservedGeneration = resource.Generation
@@ -243,7 +251,7 @@ func validateDexBcryptHash(hash []byte) error {
 	return nil
 }
 
-func (r *DexLocalUserReconciler) generatedPassword(ctx context.Context, resource *dexv1alpha1.DexLocalUser, rotationRequested bool) (string, []byte, string, error) {
+func (r *DexLocalUserReconciler) generatedPassword(ctx context.Context, resource *dexv1alpha1.DexLocalUser, rotationRequested, sourceChanged bool) (string, []byte, string, error) {
 	policy := resource.Spec.Password.Generated
 	secret := &corev1.Secret{}
 	key := types.NamespacedName{Namespace: resource.Namespace, Name: policy.SecretName}
@@ -268,7 +276,7 @@ func (r *DexLocalUserReconciler) generatedPassword(ctx context.Context, resource
 			}
 			return password, hash, secret.ResourceVersion, nil
 		}
-		if !rotationRequested && resource.Status.AppliedSecretResourceVersion != "" && secret.ResourceVersion != resource.Status.AppliedSecretResourceVersion {
+		if !rotationRequested && !sourceChanged && resource.Status.AppliedSecretResourceVersion != "" && secret.ResourceVersion != resource.Status.AppliedSecretResourceVersion {
 			return "", nil, "", errors.New("generated password Secret changed without rotation")
 		}
 		password, passwordOK := secret.Data["password"]
@@ -281,7 +289,7 @@ func (r *DexLocalUserReconciler) generatedPassword(ctx context.Context, resource
 	if !apierrors.IsNotFound(err) {
 		return "", nil, "", err
 	}
-	if resource.Status.AppliedSecretResourceVersion != "" && !rotationRequested {
+	if resource.Status.AppliedSecretResourceVersion != "" && !rotationRequested && !sourceChanged {
 		return "", nil, "", errors.New("generated password Secret is lost")
 	}
 

@@ -158,11 +158,18 @@ spec:
             type: object
             x-kubernetes-validations:
             - message: userID is immutable once specified
-              rule: '!has(oldSelf.userID) || self.userID == oldSelf.userID'
+              rule: '!has(oldSelf.userID) || (has(self.userID) && self.userID == oldSelf.userID)'
           status:
             description: DexLocalUserStatus defines the observed state of a Dex local
               user.
             properties:
+              appliedCredentialSource:
+                description: AppliedCredentialSource is the last converged provided
+                  or generated password mode.
+                enum:
+                - Provided
+                - Generated
+                type: string
               appliedSecretResourceVersion:
                 description: AppliedSecretResourceVersion is the last converged input/generated
                   Secret version.

@@ -286,6 +286,36 @@ func TestDexLocalUser(t *testing.T) {
 		awaitSecretAbsence(t, ctx, harness.client, resource.Spec.Password.Generated.SecretName)
 	})
 
+	t.Run("provided to generated password source transition", func(t *testing.T) {
+		hash := mustBcryptHash(t, "source-transition-provided-password")
+		provided := mustCreateOpaqueSecret(t, ctx, harness.client, "source-transition-hash", map[string][]byte{"bcryptHash": hash})
+		resource := newProvidedLocalUser("source-transition-user", "source-transition@example.com", provided.Name)
+		mustCreate(t, ctx, harness.client, resource)
+		managed := awaitReadyLocalUser(t, ctx, harness.client, resource.Name)
+		assertPasswordVerification(t, ctx, harness, resource.Spec.Email, "source-transition-provided-password", true)
+
+		previousGeneration := managed.Generation
+		managed.Spec.Password = dexv1alpha1.DexLocalUserPasswordSpec{Generated: &dexv1alpha1.GeneratedPasswordSpec{
+			SecretName:    "source-transition-generated",
+			Length:        20,
+			CharacterSets: []dexv1alpha1.PasswordCharacterSet{dexv1alpha1.PasswordCharacterSetLetters, dexv1alpha1.PasswordCharacterSetNumbers},
+		}}
+		mustUpdate(t, ctx, harness.client, managed)
+		managed = awaitReadyLocalUserAfter(t, ctx, harness.client, resource.Name, previousGeneration)
+		generated := awaitSecret(t, ctx, harness.client, managed.Spec.Password.Generated.SecretName)
+		generatedPassword := string(generated.Data["password"])
+		assertPasswordVerification(t, ctx, harness, resource.Spec.Email, generatedPassword, true)
+
+		generated.Data["password"] = []byte("source-transition-manual-edit")
+		generated.Data["bcryptHash"] = mustBcryptHash(t, "source-transition-manual-edit")
+		mustUpdate(t, ctx, harness.client, generated)
+		managed = awaitLocalUserCondition(t, ctx, harness.client, resource.Name, metav1.ConditionFalse, controller.ReasonConflict)
+		assertPasswordVerification(t, ctx, harness, resource.Spec.Email, generatedPassword, true)
+
+		mustDelete(t, ctx, harness.client, managed)
+		awaitLocalUserDeletion(t, ctx, harness.client, resource.Name)
+	})
+
 	t.Run("adoption requires matching resolved user ID", func(t *testing.T) {
 		const observedID = "existing-subject"
 		hash := mustBcryptHash(t, "adopted-password")

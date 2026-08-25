@@ -44,6 +44,31 @@ var (
 	qrCodePattern     = regexp.MustCompile(`src="data:image/png;base64,([^"]+)"`)
 )
 
+const (
+	totpPeriod          = 30 * time.Second
+	minimumTOTPValidity = 5 * time.Second
+	totpBoundaryGuard   = 100 * time.Millisecond
+)
+
+func TestTOTPFreshnessDelay(t *testing.T) {
+	tests := []struct {
+		name string
+		now  time.Time
+		want time.Duration
+	}{
+		{name: "enough validity remains", now: time.Unix(24, 0), want: 0},
+		{name: "exact minimum remains", now: time.Unix(25, 0), want: 0},
+		{name: "near boundary", now: time.Unix(26, 0), want: 4100 * time.Millisecond},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := totpFreshnessDelay(tt.now); got != tt.want {
+				t.Fatalf("totpFreshnessDelay() = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestMFATOTP(t *testing.T) {
 	dexHarness := startDexMFAHarness(t, "totp-1")
 	harness := startKubernetesHarness(t, dexHarness)
@@ -320,6 +345,9 @@ func completeTOTPLogin(t *testing.T, harness *dexHarness, clientID, redirectURI,
 	response = mustSubmitForm(t, httpClient, response.Request.URL, formAction(t, body), url.Values{"login": {email}, "password": {password}})
 	body = readHTTPBody(t, response)
 	totpURI := decodeTOTPQRCode(t, qrCode(t, body))
+	if delay := totpFreshnessDelay(time.Now()); delay > 0 {
+		time.Sleep(delay)
+	}
 	code := currentTOTPCode(t, totpURI, time.Now())
 	response = mustSubmitForm(t, httpClient, response.Request.URL, formAction(t, body), url.Values{"totp": {code}})
 	defer response.Body.Close()
@@ -331,6 +359,14 @@ func completeTOTPLogin(t *testing.T, harness *dexHarness, clientID, redirectURI,
 		t.Fatalf("OIDC callback = %s", location.Redacted())
 	}
 	return totpURI
+}
+
+func totpFreshnessDelay(now time.Time) time.Duration {
+	remaining := totpPeriod - time.Duration(now.UnixNano()%int64(totpPeriod))
+	if remaining >= minimumTOTPValidity {
+		return 0
+	}
+	return remaining + totpBoundaryGuard
 }
 
 func dexLoginHTTPClient(t *testing.T, harness *dexHarness) *http.Client {

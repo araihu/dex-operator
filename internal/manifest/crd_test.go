@@ -74,6 +74,9 @@ func TestCRDContract(t *testing.T) {
 	t.Run("DexLocalUser password and MFA", func(t *testing.T) {
 		crd := loadCRD(t, "dex.araihu.com_dexlocalusers.yaml")
 		spec := property(t, crd.Spec.Versions[0].Schema.OpenAPIV3Schema, "spec")
+		if !hasValidation(spec, "has(self.userID) && self.userID == oldSelf.userID") {
+			t.Fatal("userID immutability does not prohibit removing a previously specified value")
+		}
 		password := property(t, spec, "password")
 		if !hasValidation(password, "has(self.hashSecretRef) != has(self.generated)") {
 			t.Fatal("password does not require exactly one source")
@@ -87,6 +90,9 @@ func TestCRDContract(t *testing.T) {
 		if sets.MinItems == nil || *sets.MinItems != 1 || sets.XListType == nil || *sets.XListType != "set" {
 			t.Fatalf("characterSets must be a non-empty set: %#v", sets)
 		}
+		if sets.Items == nil || sets.Items.Schema == nil {
+			t.Fatal("characterSets has no item schema")
+		}
 		wantEnums := []string{"letters", "numbers", "symbols"}
 		for _, want := range wantEnums {
 			if !enumContains(sets.Items.Schema.Enum, want) {
@@ -94,7 +100,10 @@ func TestCRDContract(t *testing.T) {
 			}
 		}
 		credentialIDs := property(t, property(t, spec, "mfa"), "removeWebAuthnCredentialIDs")
-		if credentialIDs.Items == nil || credentialIDs.Items.Schema == nil || credentialIDs.Items.Schema.Pattern != "^[A-Za-z0-9_-]+$" {
+		if credentialIDs.Items == nil || credentialIDs.Items.Schema == nil {
+			t.Fatal("removeWebAuthnCredentialIDs has no item schema")
+		}
+		if credentialIDs.Items.Schema.Pattern != "^[A-Za-z0-9_-]+$" {
 			t.Fatalf("WebAuthn credential ID pattern = %q", credentialIDs.Items.Schema.Pattern)
 		}
 	})

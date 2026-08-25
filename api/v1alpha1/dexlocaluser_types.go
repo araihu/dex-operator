@@ -80,7 +80,7 @@ type DexLocalUserMFASpec struct {
 }
 
 // DexLocalUserSpec defines the desired state of a Dex local user.
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.userID) || self.userID == oldSelf.userID",message="userID is immutable once specified"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.userID) || (has(self.userID) && self.userID == oldSelf.userID)",message="userID is immutable once specified"
 type DexLocalUserSpec struct {
 	// Email is the immutable Dex password-record key.
 	// +kubebuilder:validation:MinLength=1
@@ -159,6 +159,10 @@ type DexLocalUserStatus struct {
 	// AppliedSecretResourceVersion is the last converged input/generated Secret version.
 	// +optional
 	AppliedSecretResourceVersion string `json:"appliedSecretResourceVersion,omitempty"`
+	// AppliedCredentialSource is the last converged provided or generated password mode.
+	// +kubebuilder:validation:Enum=Provided;Generated
+	// +optional
+	AppliedCredentialSource string `json:"appliedCredentialSource,omitempty"`
 	// MFADevices contains only non-secret device metadata.
 	// +optional
 	MFADevices []MFADeviceStatus `json:"mfaDevices,omitempty"`
