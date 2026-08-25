@@ -210,8 +210,11 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&controller.DexOAuth2ClientReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		Dex:               dexClient,
+		CompatibilityGate: compatibilityGate,
+		ReconcileInterval: runtimeConfig.ReconcileInterval,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "dexoauth2client")
 		os.Exit(1)

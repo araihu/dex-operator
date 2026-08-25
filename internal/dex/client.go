@@ -121,6 +121,54 @@ func (client *Client) DeleteConnector(ctx context.Context, id string) (bool, err
 	return response.GetNotFound(), nil
 }
 
+// GetOAuth2Client returns a Dex client, including its secret, only in memory.
+func (client *Client) GetOAuth2Client(ctx context.Context, id string) (*dexapi.Client, bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
+	response, err := client.api.GetClient(ctx, &dexapi.GetClientReq{Id: id})
+	if err != nil {
+		statusErr := status.Convert(err)
+		if statusErr.Code() == codes.NotFound || statusErr.Code() == codes.Unknown && statusErr.Message() == "not found" {
+			return nil, false, nil
+		}
+		return nil, false, operationError("get OAuth2 client", err)
+	}
+	return response.GetClient(), true, nil
+}
+
+// CreateOAuth2Client creates a Dex client and reports an ID collision.
+func (client *Client) CreateOAuth2Client(ctx context.Context, oauth2Client *dexapi.Client) (bool, *dexapi.Client, error) {
+	ctx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
+	response, err := client.api.CreateClient(ctx, &dexapi.CreateClientReq{Client: oauth2Client})
+	if err != nil {
+		return false, nil, operationError("create OAuth2 client", err)
+	}
+	return response.GetAlreadyExists(), response.GetClient(), nil
+}
+
+// UpdateOAuth2Client updates mutable Dex client fields and reports remote absence.
+func (client *Client) UpdateOAuth2Client(ctx context.Context, request *dexapi.UpdateClientReq) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
+	response, err := client.api.UpdateClient(ctx, request)
+	if err != nil {
+		return false, operationError("update OAuth2 client", err)
+	}
+	return response.GetNotFound(), nil
+}
+
+// DeleteOAuth2Client deletes a Dex client and reports remote absence.
+func (client *Client) DeleteOAuth2Client(ctx context.Context, id string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
+	response, err := client.api.DeleteClient(ctx, &dexapi.DeleteClientReq{Id: id})
+	if err != nil {
+		return false, operationError("delete OAuth2 client", err)
+	}
+	return response.GetNotFound(), nil
+}
+
 // ListUserIdentities returns Dex user identities.
 func (client *Client) ListUserIdentities(ctx context.Context) (*dexapi.ListUserIdentitiesResp, error) {
 	ctx, cancel := context.WithTimeout(ctx, rpcTimeout)

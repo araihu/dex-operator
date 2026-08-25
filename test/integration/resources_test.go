@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,6 +21,202 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+func TestDexOAuth2Client(t *testing.T) {
+	dexHarness := startDexHarness(t, memoryStorage)
+	harness := startKubernetesHarness(t, dexHarness)
+	ctx := context.Background()
+
+	t.Run("public lifecycle", func(t *testing.T) {
+		resource := newPublicOAuth2Client("public-client")
+		mustCreate(t, ctx, harness.client, resource)
+		managed := awaitReadyOAuth2Client(t, ctx, harness.client, resource.Name)
+		assertRemoteOAuth2Client(t, ctx, harness, desiredOAuth2Client(managed, ""))
+
+		readyBefore := meta.FindStatusCondition(managed.Status.Conditions, dexv1alpha1.ConditionReady).LastTransitionTime
+		time.Sleep(600 * time.Millisecond)
+		managed = getOAuth2Client(t, ctx, harness.client, resource.Name)
+		readyAfter := meta.FindStatusCondition(managed.Status.Conditions, dexv1alpha1.ConditionReady).LastTransitionTime
+		if !readyAfter.Equal(&readyBefore) {
+			t.Fatalf("no-op reconciliation changed Ready transition: %s -> %s", readyBefore, readyAfter)
+		}
+
+		previousGeneration := managed.Generation
+		managed.Spec.Name = "Public Updated"
+		managed.Spec.LogoURL = "https://araihu.com/logo.svg"
+		managed.Spec.RedirectURIs = []string{"https://app.araihu.com/callback", "http://127.0.0.1/callback"}
+		managed.Spec.TrustedPeers = []string{"peer-b", "peer-a"}
+		managed.Spec.AllowedConnectors = []string{"github", "local"}
+		mustUpdate(t, ctx, harness.client, managed)
+		managed = awaitReadyOAuth2ClientAfter(t, ctx, harness.client, resource.Name, previousGeneration)
+		assertRemoteOAuth2Client(t, ctx, harness, desiredOAuth2Client(managed, ""))
+
+		previousGeneration = managed.Generation
+		managed.Spec.LogoURL = ""
+		mustUpdate(t, ctx, harness.client, managed)
+		managed = awaitReadyOAuth2ClientAfter(t, ctx, harness.client, resource.Name, previousGeneration)
+		observed := remoteOAuth2Client(t, ctx, harness, resource.Spec.ID)
+		if observed == nil || observed.GetLogoUrl() != "" {
+			t.Fatal("logo removal did not converge")
+		}
+
+		if notFound, err := harness.dexClient.UpdateOAuth2Client(ctx, &dexapi.UpdateClientReq{
+			Id:                resource.Spec.ID,
+			Name:              "Drifted",
+			RedirectUris:      []string{"https://drifted.example/callback"},
+			TrustedPeers:      []string{},
+			AllowedConnectors: []string{},
+		}); err != nil || notFound {
+			t.Fatalf("inject OAuth2 client drift: notFound=%t err=%v", notFound, err)
+		}
+		awaitRemoteOAuth2Client(t, ctx, harness, resource.Spec.ID, func(observed *dexapi.Client) bool {
+			return oauth2ClientEqual(desiredOAuth2Client(managed, ""), observed)
+		})
+
+		if notFound, err := harness.dexClient.DeleteOAuth2Client(ctx, resource.Spec.ID); err != nil || notFound {
+			t.Fatalf("delete OAuth2 client out of band: notFound=%t err=%v", notFound, err)
+		}
+		awaitRemoteOAuth2Client(t, ctx, harness, resource.Spec.ID, func(observed *dexapi.Client) bool {
+			return oauth2ClientEqual(desiredOAuth2Client(managed, ""), observed)
+		})
+
+		mustDelete(t, ctx, harness.client, managed)
+		awaitOAuth2ClientDeletion(t, ctx, harness.client, resource.Name)
+		awaitRemoteOAuth2ClientAbsence(t, ctx, harness, resource.Spec.ID)
+	})
+
+	t.Run("provided secret and explicit rotation", func(t *testing.T) {
+		secret := mustCreateOpaqueSecret(t, ctx, harness.client, "provided-client-secret", map[string][]byte{"clientSecret": []byte("provided-one")})
+		resource := newConfidentialOAuth2Client("provided-client")
+		resource.Spec.Secret = &dexv1alpha1.DexOAuth2ClientSecretSpec{ProvidedSecretRef: &dexv1alpha1.SecretKeyReference{Name: secret.Name, Key: "clientSecret"}}
+		mustCreate(t, ctx, harness.client, resource)
+		managed := awaitReadyOAuth2Client(t, ctx, harness.client, resource.Name)
+		assertRemoteOAuth2Client(t, ctx, harness, desiredOAuth2Client(managed, "provided-one"))
+
+		secret = getSecret(t, ctx, harness.client, secret.Name)
+		secret.Annotations = map[string]string{"test": "resource-version-only"}
+		mustUpdate(t, ctx, harness.client, secret)
+		awaitOAuth2SecretResourceVersion(t, ctx, harness.client, resource.Name, secret.ResourceVersion)
+		assertRemoteOAuth2Client(t, ctx, harness, desiredOAuth2Client(managed, "provided-one"))
+
+		secret = getSecret(t, ctx, harness.client, secret.Name)
+		secret.Data["clientSecret"] = []byte("provided-two")
+		mustUpdate(t, ctx, harness.client, secret)
+		awaitOAuth2Condition(t, ctx, harness.client, resource.Name, metav1.ConditionFalse, controller.ReasonConflict)
+		observed := remoteOAuth2Client(t, ctx, harness, resource.Spec.ID)
+		if observed == nil || observed.GetSecret() != "provided-one" {
+			t.Fatal("unauthorized provided-secret change mutated Dex")
+		}
+
+		managed = getOAuth2Client(t, ctx, harness.client, resource.Name)
+		previousGeneration := managed.Generation
+		managed.Spec.Secret.RotationNonce = "rotation-1"
+		mustUpdate(t, ctx, harness.client, managed)
+		managed = awaitReadyOAuth2ClientAfter(t, ctx, harness.client, resource.Name, previousGeneration)
+		if managed.Status.HandledRotationNonce != "rotation-1" {
+			t.Fatalf("handled rotation nonce = %q", managed.Status.HandledRotationNonce)
+		}
+		assertRemoteOAuth2Client(t, ctx, harness, desiredOAuth2Client(managed, "provided-two"))
+
+		mustDelete(t, ctx, harness.client, managed)
+		awaitOAuth2ClientDeletion(t, ctx, harness.client, resource.Name)
+		awaitRemoteOAuth2ClientAbsence(t, ctx, harness, resource.Spec.ID)
+		if getSecretIfPresent(t, ctx, harness.client, secret.Name) == nil {
+			t.Fatal("provided Secret was deleted with the OAuth2 client")
+		}
+	})
+
+	t.Run("generated secret rotation and recovery", func(t *testing.T) {
+		resource := newConfidentialOAuth2Client("generated-client")
+		resource.Spec.Secret = &dexv1alpha1.DexOAuth2ClientSecretSpec{Generated: &dexv1alpha1.GeneratedOAuth2ClientSecretSpec{SecretName: "generated-client-secret"}}
+		mustCreate(t, ctx, harness.client, resource)
+		managed := awaitReadyOAuth2Client(t, ctx, harness.client, resource.Name)
+		generated := awaitSecret(t, ctx, harness.client, resource.Spec.Secret.Generated.SecretName)
+		generatedValue := string(generated.Data["clientSecret"])
+		if len(generatedValue) != 64 || strings.Trim(generatedValue, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-") != "" {
+			t.Fatal("generated client secret does not match the 64-character URL-safe contract")
+		}
+		if owner := metav1.GetControllerOf(generated); owner == nil || owner.UID != managed.UID {
+			t.Fatalf("generated Secret controller owner = %#v", owner)
+		}
+		assertRemoteOAuth2Client(t, ctx, harness, desiredOAuth2Client(managed, generatedValue))
+
+		generated.Data["clientSecret"] = []byte("manual-edit")
+		mustUpdate(t, ctx, harness.client, generated)
+		awaitOAuth2Condition(t, ctx, harness.client, resource.Name, metav1.ConditionFalse, controller.ReasonConflict)
+		observed := remoteOAuth2Client(t, ctx, harness, resource.Spec.ID)
+		if observed == nil || observed.GetSecret() != generatedValue {
+			t.Fatal("manual generated-Secret edit mutated Dex without rotation")
+		}
+
+		managed = getOAuth2Client(t, ctx, harness.client, resource.Name)
+		previousGeneration := managed.Generation
+		managed.Spec.Secret.RotationNonce = "generated-rotation-1"
+		mustUpdate(t, ctx, harness.client, managed)
+		managed = awaitReadyOAuth2ClientAfter(t, ctx, harness.client, resource.Name, previousGeneration)
+		rotated := awaitSecretValueChange(t, ctx, harness.client, resource.Spec.Secret.Generated.SecretName, "manual-edit")
+		if len(rotated) != 64 || rotated == generatedValue {
+			t.Fatal("generated rotation did not produce fresh 64-character material")
+		}
+		assertRemoteOAuth2Client(t, ctx, harness, desiredOAuth2Client(managed, rotated))
+
+		generated = awaitSecret(t, ctx, harness.client, resource.Spec.Secret.Generated.SecretName)
+		oldUID := generated.UID
+		mustDelete(t, ctx, harness.client, generated)
+		recovered := awaitSecretUIDChange(t, ctx, harness.client, resource.Spec.Secret.Generated.SecretName, oldUID)
+		if string(recovered.Data["clientSecret"]) != rotated {
+			t.Fatal("lost generated Secret was not recovered from owned Dex state")
+		}
+		if owner := metav1.GetControllerOf(recovered); owner == nil || owner.UID != managed.UID {
+			t.Fatalf("recovered Secret controller owner = %#v", owner)
+		}
+
+		managed = getOAuth2Client(t, ctx, harness.client, resource.Name)
+		mustDelete(t, ctx, harness.client, managed)
+		awaitOAuth2ClientDeletion(t, ctx, harness.client, resource.Name)
+		awaitRemoteOAuth2ClientAbsence(t, ctx, harness, resource.Spec.ID)
+		awaitSecretAbsence(t, ctx, harness.client, resource.Spec.Secret.Generated.SecretName)
+	})
+
+	t.Run("conflict and adoption", func(t *testing.T) {
+		const id = "adopted-client"
+		if alreadyExists, _, err := harness.dexClient.CreateOAuth2Client(ctx, &dexapi.Client{Id: id, Public: true, Name: "Existing"}); err != nil || alreadyExists {
+			t.Fatalf("create existing OAuth2 client: alreadyExists=%t err=%v", alreadyExists, err)
+		}
+		resource := newPublicOAuth2Client(id)
+		mustCreate(t, ctx, harness.client, resource)
+		conflicted := awaitOAuth2Condition(t, ctx, harness.client, resource.Name, metav1.ConditionFalse, controller.ReasonConflict)
+		if conflicted.Status.ExternalID != "" {
+			t.Fatalf("conflicted resource claimed external ID %q", conflicted.Status.ExternalID)
+		}
+		previousGeneration := conflicted.Generation
+		conflicted.Spec.AdoptExisting = true
+		mustUpdate(t, ctx, harness.client, conflicted)
+		adopted := awaitReadyOAuth2ClientAfter(t, ctx, harness.client, resource.Name, previousGeneration)
+		assertRemoteOAuth2Client(t, ctx, harness, desiredOAuth2Client(adopted, ""))
+		mustDelete(t, ctx, harness.client, adopted)
+		awaitOAuth2ClientDeletion(t, ctx, harness.client, resource.Name)
+		awaitRemoteOAuth2ClientAbsence(t, ctx, harness, id)
+	})
+
+	t.Run("Retain detaches generated Secret", func(t *testing.T) {
+		resource := newConfidentialOAuth2Client("retained-client")
+		resource.Spec.Secret = &dexv1alpha1.DexOAuth2ClientSecretSpec{Generated: &dexv1alpha1.GeneratedOAuth2ClientSecretSpec{SecretName: "retained-client-secret"}}
+		resource.Spec.DeletionPolicy = dexv1alpha1.DeletionPolicyRetain
+		mustCreate(t, ctx, harness.client, resource)
+		managed := awaitReadyOAuth2Client(t, ctx, harness.client, resource.Name)
+		mustDelete(t, ctx, harness.client, managed)
+		awaitOAuth2ClientDeletion(t, ctx, harness.client, resource.Name)
+		retainedSecret := awaitSecret(t, ctx, harness.client, resource.Spec.Secret.Generated.SecretName)
+		if metav1.GetControllerOf(retainedSecret) != nil {
+			t.Fatalf("retained generated Secret still has a controller: %#v", retainedSecret.OwnerReferences)
+		}
+		if remoteOAuth2Client(t, ctx, harness, resource.Spec.ID) == nil {
+			t.Fatal("Retain deleted the remote OAuth2 client")
+		}
+		_, _ = harness.dexClient.DeleteOAuth2Client(ctx, resource.Spec.ID)
+	})
+}
 
 func TestDexConnector(t *testing.T) {
 	dexHarness := startDexHarness(t, memoryStorage)
@@ -379,4 +576,235 @@ func containsString(values []string, value string) bool {
 		}
 	}
 	return false
+}
+
+func newPublicOAuth2Client(name string) *dexv1alpha1.DexOAuth2Client {
+	return &dexv1alpha1.DexOAuth2Client{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		Spec: dexv1alpha1.DexOAuth2ClientSpec{
+			ID:           name,
+			Public:       true,
+			Name:         "Public Client",
+			RedirectURIs: []string{"https://app.araihu.com/callback"},
+		},
+	}
+}
+
+func newConfidentialOAuth2Client(name string) *dexv1alpha1.DexOAuth2Client {
+	return &dexv1alpha1.DexOAuth2Client{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		Spec: dexv1alpha1.DexOAuth2ClientSpec{
+			ID:           name,
+			Name:         "Confidential Client",
+			RedirectURIs: []string{"https://app.araihu.com/callback"},
+		},
+	}
+}
+
+func desiredOAuth2Client(resource *dexv1alpha1.DexOAuth2Client, secret string) *dexapi.Client {
+	return &dexapi.Client{
+		Id:                resource.Spec.ID,
+		Secret:            secret,
+		Public:            resource.Spec.Public,
+		Name:              resource.Spec.Name,
+		LogoUrl:           resource.Spec.LogoURL,
+		RedirectUris:      dexclient.NormalizeSet(resource.Spec.RedirectURIs),
+		TrustedPeers:      dexclient.NormalizeSet(resource.Spec.TrustedPeers),
+		AllowedConnectors: dexclient.NormalizeSet(resource.Spec.AllowedConnectors),
+	}
+}
+
+func mustCreateOpaqueSecret(t *testing.T, ctx context.Context, kube client.Client, name string, data map[string][]byte) *corev1.Secret {
+	t.Helper()
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"}, Type: corev1.SecretTypeOpaque, Data: data}
+	mustCreate(t, ctx, kube, secret)
+	return secret
+}
+
+func getOAuth2Client(t *testing.T, ctx context.Context, kube client.Client, name string) *dexv1alpha1.DexOAuth2Client {
+	t.Helper()
+	resource := &dexv1alpha1.DexOAuth2Client{}
+	if err := kube.Get(ctx, types.NamespacedName{Namespace: "default", Name: name}, resource); err != nil {
+		t.Fatal(err)
+	}
+	return resource
+}
+
+func awaitReadyOAuth2Client(t *testing.T, ctx context.Context, kube client.Client, name string) *dexv1alpha1.DexOAuth2Client {
+	t.Helper()
+	return awaitOAuth2Condition(t, ctx, kube, name, metav1.ConditionTrue, controller.ReasonConverged)
+}
+
+func awaitReadyOAuth2ClientAfter(t *testing.T, ctx context.Context, kube client.Client, name string, generation int64) *dexv1alpha1.DexOAuth2Client {
+	t.Helper()
+	var result *dexv1alpha1.DexOAuth2Client
+	eventually(t, func() (bool, error) {
+		resource := &dexv1alpha1.DexOAuth2Client{}
+		if err := kube.Get(ctx, types.NamespacedName{Namespace: "default", Name: name}, resource); err != nil {
+			return false, err
+		}
+		condition := meta.FindStatusCondition(resource.Status.Conditions, dexv1alpha1.ConditionReady)
+		if resource.Generation > generation && condition != nil && condition.ObservedGeneration == resource.Generation && condition.Status == metav1.ConditionTrue && condition.Reason == controller.ReasonConverged {
+			result = resource
+			return true, nil
+		}
+		return false, nil
+	})
+	return result
+}
+
+func awaitOAuth2Condition(t *testing.T, ctx context.Context, kube client.Client, name string, status metav1.ConditionStatus, reason string) *dexv1alpha1.DexOAuth2Client {
+	t.Helper()
+	var result *dexv1alpha1.DexOAuth2Client
+	eventually(t, func() (bool, error) {
+		resource := &dexv1alpha1.DexOAuth2Client{}
+		if err := kube.Get(ctx, types.NamespacedName{Namespace: "default", Name: name}, resource); err != nil {
+			return false, err
+		}
+		condition := meta.FindStatusCondition(resource.Status.Conditions, dexv1alpha1.ConditionReady)
+		if condition != nil && condition.ObservedGeneration == resource.Generation && condition.Status == status && condition.Reason == reason {
+			result = resource
+			return true, nil
+		}
+		return false, nil
+	})
+	return result
+}
+
+func awaitOAuth2SecretResourceVersion(t *testing.T, ctx context.Context, kube client.Client, name, resourceVersion string) {
+	t.Helper()
+	eventually(t, func() (bool, error) {
+		resource := &dexv1alpha1.DexOAuth2Client{}
+		if err := kube.Get(ctx, types.NamespacedName{Namespace: "default", Name: name}, resource); err != nil {
+			return false, err
+		}
+		return resource.Status.AppliedSecretResourceVersion == resourceVersion, nil
+	})
+}
+
+func awaitOAuth2ClientDeletion(t *testing.T, ctx context.Context, kube client.Client, name string) {
+	t.Helper()
+	eventually(t, func() (bool, error) {
+		err := kube.Get(ctx, types.NamespacedName{Namespace: "default", Name: name}, &dexv1alpha1.DexOAuth2Client{})
+		return apierrors.IsNotFound(err), ignoreNotFound(err)
+	})
+}
+
+func remoteOAuth2Client(t *testing.T, ctx context.Context, harness *kubernetesHarness, id string) *dexapi.Client {
+	t.Helper()
+	observed, found, err := harness.dexClient.GetOAuth2Client(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		return nil
+	}
+	return observed
+}
+
+func assertRemoteOAuth2Client(t *testing.T, ctx context.Context, harness *kubernetesHarness, desired *dexapi.Client) {
+	t.Helper()
+	observed := remoteOAuth2Client(t, ctx, harness, desired.GetId())
+	if observed == nil {
+		t.Fatalf("remote OAuth2 client %q is absent", desired.GetId())
+	}
+	if !oauth2ClientEqual(desired, observed) {
+		t.Fatalf("remote OAuth2 client mismatch: public=%t name=%q logo=%q redirects=%v peers=%v connectors=%v secretMatches=%t",
+			observed.GetPublic(), observed.GetName(), observed.GetLogoUrl(), observed.GetRedirectUris(), observed.GetTrustedPeers(), observed.GetAllowedConnectors(), observed.GetSecret() == desired.GetSecret())
+	}
+}
+
+func oauth2ClientEqual(desired, observed *dexapi.Client) bool {
+	return desired.GetId() == observed.GetId() &&
+		desired.GetSecret() == observed.GetSecret() &&
+		desired.GetPublic() == observed.GetPublic() &&
+		desired.GetName() == observed.GetName() &&
+		desired.GetLogoUrl() == observed.GetLogoUrl() &&
+		equalStrings(desired.GetRedirectUris(), observed.GetRedirectUris()) &&
+		equalStrings(desired.GetTrustedPeers(), observed.GetTrustedPeers()) &&
+		equalStrings(desired.GetAllowedConnectors(), observed.GetAllowedConnectors())
+}
+
+func awaitRemoteOAuth2Client(t *testing.T, ctx context.Context, harness *kubernetesHarness, id string, check func(*dexapi.Client) bool) {
+	t.Helper()
+	eventually(t, func() (bool, error) {
+		observed, found, err := harness.dexClient.GetOAuth2Client(ctx, id)
+		if err != nil {
+			return false, err
+		}
+		return found && check(observed), nil
+	})
+}
+
+func awaitRemoteOAuth2ClientAbsence(t *testing.T, ctx context.Context, harness *kubernetesHarness, id string) {
+	t.Helper()
+	eventually(t, func() (bool, error) {
+		_, found, err := harness.dexClient.GetOAuth2Client(ctx, id)
+		return !found, err
+	})
+}
+
+func awaitSecret(t *testing.T, ctx context.Context, kube client.Client, name string) *corev1.Secret {
+	t.Helper()
+	var result *corev1.Secret
+	eventually(t, func() (bool, error) {
+		secret := &corev1.Secret{}
+		if err := kube.Get(ctx, types.NamespacedName{Namespace: "default", Name: name}, secret); err != nil {
+			return false, ignoreNotFound(err)
+		}
+		result = secret
+		return true, nil
+	})
+	return result
+}
+
+func getSecretIfPresent(t *testing.T, ctx context.Context, kube client.Client, name string) *corev1.Secret {
+	t.Helper()
+	secret := &corev1.Secret{}
+	if err := kube.Get(ctx, types.NamespacedName{Namespace: "default", Name: name}, secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		t.Fatal(err)
+	}
+	return secret
+}
+
+func awaitSecretValueChange(t *testing.T, ctx context.Context, kube client.Client, name, previous string) string {
+	t.Helper()
+	var result string
+	eventually(t, func() (bool, error) {
+		secret := &corev1.Secret{}
+		if err := kube.Get(ctx, types.NamespacedName{Namespace: "default", Name: name}, secret); err != nil {
+			return false, ignoreNotFound(err)
+		}
+		result = string(secret.Data["clientSecret"])
+		return result != "" && result != previous, nil
+	})
+	return result
+}
+
+func awaitSecretUIDChange(t *testing.T, ctx context.Context, kube client.Client, name string, previous types.UID) *corev1.Secret {
+	t.Helper()
+	var result *corev1.Secret
+	eventually(t, func() (bool, error) {
+		secret := &corev1.Secret{}
+		if err := kube.Get(ctx, types.NamespacedName{Namespace: "default", Name: name}, secret); err != nil {
+			return false, ignoreNotFound(err)
+		}
+		if secret.UID == previous {
+			return false, nil
+		}
+		result = secret
+		return true, nil
+	})
+	return result
+}
+
+func awaitSecretAbsence(t *testing.T, ctx context.Context, kube client.Client, name string) {
+	t.Helper()
+	eventually(t, func() (bool, error) {
+		err := kube.Get(ctx, types.NamespacedName{Namespace: "default", Name: name}, &corev1.Secret{})
+		return apierrors.IsNotFound(err), ignoreNotFound(err)
+	})
 }
