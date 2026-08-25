@@ -1,4 +1,4 @@
-.PHONY: generate verify-generated test envtest build-test-dex test-integration race build verify
+.PHONY: generate verify-generated test envtest build-test-dex test-integration race build docker-build verify
 
 ENVTEST_CACHE ?= .cache/envtest
 
@@ -26,6 +26,9 @@ race:
 
 build:
 	GOWORK=off go build ./cmd/...
+
+docker-build:
+	docker build -t dex-operator:local .
 
 verify: verify-generated test race
 	GOWORK=off go vet ./...

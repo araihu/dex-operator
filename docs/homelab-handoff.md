@@ -1,0 +1,45 @@
+# Homelab integration handoff
+
+This is a future, approval-gated mapping. No `home-lab` file was changed, no cluster was queried or mutated, and no concrete CNPG cluster, Secret, registry, or image was selected.
+
+## Ownership
+
+Helm/GitOps must continue to own the Dex Deployment, Service, issuer/config, image override, PostgreSQL storage block, gRPC listener, MFA authenticators/chains, certificates, NetworkPolicies, probes, and rollout annotations. It also owns the operator installation and ordering.
+
+The operator owns only supported dynamic Dex records represented by its CRs, generated credential Secrets, CR status, and finalizers. It does not provision CNPG, receive the Dex database credentials, touch Dex tables, or own Dex configuration/Deployment.
+
+## Placeholder mapping
+
+When integration is separately authorized, map Dex PostgreSQL configuration to:
+
+- write host: `<dex-cnpg-cluster>-rw`;
+- application credentials: existing CNPG-generated `<dex-db-app-secret>`;
+- database/name/SSL fields: values already owned by that Secret and the CNPG integration contract.
+
+Do not teach the operator these values and do not grant it access to the application Secret. Select the actual cluster and Secret only during the homelab change review.
+
+Dex must use the exact reviewed image described in [compatibility](compatibility.md), with `DEX_API_CONNECTORS_CRUD=true`, `DEX_API_SESSIONS_IDENTITIES_CRUD=true`, and `DEX_SESSIONS_ENABLED=true` when MFA is enabled. This repository does not publish that custom Dex image; registry selection/build/publication is a separate authorization.
+
+The operator client certificate Secret must have cert-manager keys `ca.crt`, `tls.crt`, and `tls.key`; the configured gRPC server name must exactly match the server certificate. Add Reloader/checksum ownership so Dex and operator restart on the certificate/config Secret changes they consume.
+
+## Suggested Argo ordering
+
+1. Existing CNPG cluster, application Secret, and successful restore evidence.
+2. Dex certificate/config Secrets and NetworkPolicies.
+3. Dex Deployment/Service with PostgreSQL storage; wait for database migration, OIDC readiness, and gRPC compatibility.
+4. Operator CRDs, RBAC, TLS Secret, and Deployment; wait for readiness.
+5. Dynamic `DexConnector`, `DexOAuth2Client`, and `DexLocalUser` resources.
+
+Before step 5, remove matching connectors, clients, and local users from static Dex configuration and finish the Dex rollout. Never let static and dynamic ownership overlap. Use sync waves/health gates so a transient rollout cannot cause premature adoption or deletion.
+
+## Integration review checklist
+
+- Replace every `.invalid` address and fake Secret name in the generic manifests.
+- Select immutable operator and Dex image digests; publication remains separately authorized.
+- Narrow egress/ingress with the policy in [security](security.md).
+- Review cluster-wide Secret RBAC and who may create each CRD.
+- Confirm Git, Kubernetes/etcd, and CNPG backup/restore coverage.
+- Stage one non-critical resource per kind, then test drift, deletion policy, login, client authentication, connector behavior, and MFA reset.
+- Document the break-glass finalizer procedure and its orphaning consequences.
+
+Do not deploy, publish images, create releases, or edit `home-lab` from this handoff alone.

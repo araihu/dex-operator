@@ -63,8 +63,19 @@ spec:
         args:
           - --leader-elect
           - --health-probe-bind-address=:8081
-        image: controller:latest
+        image: dex-operator:local
         name: manager
+        env:
+        - name: DEX_GRPC_ADDRESS
+          value: dex.example.invalid:5557
+        - name: DEX_GRPC_SERVER_NAME
+          value: dex.example.invalid
+        - name: DEX_GRPC_INSECURE
+          value: "false"
+        - name: DEX_RECONCILE_INTERVAL
+          value: 5m
+        - name: DEX_EXPECTED_SERVER_VERSION
+          value: v2.46.0-20260806171424-ab64ed77
         ports:
         - containerPort: 8081
           name: health
@@ -96,7 +107,13 @@ spec:
           requests:
             cpu: 10m
             memory: 64Mi
-        volumeMounts: []
-      volumes: []
+        volumeMounts:
+        - name: dex-grpc-tls
+          mountPath: /var/run/dex-operator/tls
+          readOnly: true
+      volumes:
+      - name: dex-grpc-tls
+        secret:
+          secretName: dex-operator-grpc-client-tls
       serviceAccountName: controller-manager
       terminationGracePeriodSeconds: 10
