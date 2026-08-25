@@ -101,13 +101,13 @@ func TestDexLocalUser(t *testing.T) {
 		assertRemotePassword(t, ctx, harness, resource.Spec.Email, resource.Spec.Username, resource.Spec.UserID)
 		assertPasswordVerification(t, ctx, harness, resource.Spec.Email, password, true)
 
-		readyBefore := meta.FindStatusCondition(managed.Status.Conditions, dexv1alpha1.ConditionReady).LastTransitionTime
 		time.Sleep(600 * time.Millisecond)
 		managed = getLocalUser(t, ctx, harness.client, resource.Name)
-		readyAfter := meta.FindStatusCondition(managed.Status.Conditions, dexv1alpha1.ConditionReady).LastTransitionTime
-		if !readyAfter.Equal(&readyBefore) {
-			t.Fatalf("no-op reconciliation changed Ready transition: %s -> %s", readyBefore, readyAfter)
+		noOpSecret := awaitSecret(t, ctx, harness.client, resource.Spec.Password.Generated.SecretName)
+		if string(noOpSecret.Data["password"]) != password || managed.Status.AppliedSecretResourceVersion != noOpSecret.ResourceVersion {
+			t.Fatal("no-op reconciliation changed or stopped tracking generated credentials")
 		}
+		assertPasswordVerification(t, ctx, harness, resource.Spec.Email, password, true)
 
 		previousGeneration := managed.Generation
 		managed.Spec.Password.Generated.Length = 30

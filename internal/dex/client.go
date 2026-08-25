@@ -240,6 +240,54 @@ func (client *Client) DeleteUserIdentity(ctx context.Context, userID, connectorI
 	return response.GetNotFound(), nil
 }
 
+// ListMFADevices returns non-secret MFA metadata and reports identity absence.
+func (client *Client) ListMFADevices(ctx context.Context, userID, connectorID string) ([]*dexapi.MFADeviceInfo, bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
+	response, err := client.api.ListMFADevices(ctx, &dexapi.ListMFADevicesReq{UserId: userID, ConnectorId: connectorID})
+	if err != nil {
+		statusErr := status.Convert(err)
+		if statusErr.Code() == codes.NotFound || statusErr.Code() == codes.Unknown && statusErr.Message() == "not found" {
+			return nil, false, nil
+		}
+		return nil, false, operationError("list MFA devices", err)
+	}
+	return response.GetDevices(), true, nil
+}
+
+// ResetMFA clears all MFA devices and reports identity absence.
+func (client *Client) ResetMFA(ctx context.Context, userID, connectorID string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
+	response, err := client.api.ResetMFA(ctx, &dexapi.ResetMFAReq{UserId: userID, ConnectorId: connectorID})
+	if err != nil {
+		return false, operationError("reset MFA", err)
+	}
+	return response.GetNotFound(), nil
+}
+
+// DeleteMFASecret removes one authenticator and reports absence.
+func (client *Client) DeleteMFASecret(ctx context.Context, userID, connectorID, authenticatorID string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
+	response, err := client.api.DeleteMFASecret(ctx, &dexapi.DeleteMFASecretReq{UserId: userID, ConnectorId: connectorID, AuthenticatorId: authenticatorID})
+	if err != nil {
+		return false, operationError("delete MFA authenticator", err)
+	}
+	return response.GetNotFound(), nil
+}
+
+// DeleteWebAuthnCredential removes one credential and reports absence.
+func (client *Client) DeleteWebAuthnCredential(ctx context.Context, userID, connectorID string, credentialID []byte) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
+	response, err := client.api.DeleteWebAuthnCredential(ctx, &dexapi.DeleteWebAuthnCredentialReq{UserId: userID, ConnectorId: connectorID, CredentialId: credentialID})
+	if err != nil {
+		return false, operationError("delete WebAuthn credential", err)
+	}
+	return response.GetNotFound(), nil
+}
+
 func loadTLSCredentials(serverName string, files TLSFiles) (credentials.TransportCredentials, error) {
 	caPEM, err := os.ReadFile(files.CA)
 	if err != nil {

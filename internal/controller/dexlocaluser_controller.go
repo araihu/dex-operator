@@ -188,6 +188,13 @@ func (r *DexLocalUserReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			return r.statusResult(ctx, resource, ReasonDriftCorrectionFailed, "Dex password credential did not converge.", metav1.ConditionTrue, true, nil)
 		}
 	}
+	mfaDevices, handledMFAResetNonce, mfaErr := r.reconcileMFA(ctx, resolvedUserID, resource.Spec.MFA, resource.Status.HandledMFAResetNonce)
+	if mfaErr != nil {
+		if errors.Is(mfaErr, errInvalidMFACredentialID) {
+			return r.statusResult(ctx, resource, ReasonInvalidInput, "A WebAuthn credential removal ID is not valid unpadded base64url.", metav1.ConditionTrue, false, nil)
+		}
+		return r.statusResult(ctx, resource, ReasonDriftCorrectionFailed, "Dex MFA state could not be reconciled.", metav1.ConditionTrue, true, mfaErr)
+	}
 	if err := r.patchStatus(ctx, resource, func(status *dexv1alpha1.DexLocalUserStatus) error {
 		status.ResolvedUserID = resolvedUserID
 		status.HandledRotationNonce = ""
@@ -195,6 +202,8 @@ func (r *DexLocalUserReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			status.HandledRotationNonce = resource.Spec.Password.Generated.RotationNonce
 		}
 		status.AppliedSecretResourceVersion = secretResourceVersion
+		status.HandledMFAResetNonce = handledMFAResetNonce
+		status.MFADevices = mfaDevices
 		status.ObservedGeneration = resource.Generation
 		if err := SetCondition(&status.Conditions, resource.Generation, dexv1alpha1.ConditionReady, metav1.ConditionTrue, ReasonConverged, "Dex local user is converged."); err != nil {
 			return err
