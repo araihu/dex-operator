@@ -5,6 +5,8 @@ package integration
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -23,6 +25,114 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+func TestReadyConditionSet(t *testing.T) {
+	conditions := []metav1.Condition{
+		{Type: dexv1alpha1.ConditionReady, Status: metav1.ConditionTrue, Reason: controller.ReasonConverged, ObservedGeneration: 3},
+		{Type: dexv1alpha1.ConditionCompatible, Status: metav1.ConditionTrue, Reason: controller.ReasonConverged, ObservedGeneration: 3},
+		{Type: dexv1alpha1.ConditionDrifted, Status: metav1.ConditionFalse, Reason: controller.ReasonConverged, ObservedGeneration: 3},
+	}
+	if !readyConditionSet(conditions, 3) {
+		t.Fatal("converged condition set was rejected")
+	}
+	conditions[2].Status = metav1.ConditionTrue
+	if readyConditionSet(conditions, 3) {
+		t.Fatal("drifted condition set was accepted")
+	}
+}
+
+func TestRestartReplay(t *testing.T) {
+	dexHarness := startDexHarness(t, sqliteStorage)
+	harness := startKubernetesHarness(t, dexHarness)
+	ctx := context.Background()
+
+	connectorConfig := []byte(`{"restart":"connector"}`)
+	mustCreateConfigSecret(t, ctx, harness.client, "restart-connector-config", connectorConfig)
+	connector := newConnector("restart-connector", "restart-connector-config")
+	oauth := newConfidentialOAuth2Client("restart-client")
+	oauth.Spec.Secret = &dexv1alpha1.DexOAuth2ClientSecretSpec{Generated: &dexv1alpha1.GeneratedOAuth2ClientSecretSpec{SecretName: "restart-client-secret"}}
+	user := newGeneratedLocalUser("restart-user", "restart@example.com", "restart-subject", "restart-user-secret")
+	for _, resource := range []client.Object{connector, oauth, user} {
+		mustCreate(t, ctx, harness.client, resource)
+	}
+	awaitReadyConnector(t, ctx, harness.client, connector.Name)
+	awaitReadyOAuth2Client(t, ctx, harness.client, oauth.Name)
+	awaitReadyLocalUser(t, ctx, harness.client, user.Name)
+	clientSecret := string(awaitSecret(t, ctx, harness.client, oauth.Spec.Secret.Generated.SecretName).Data["clientSecret"])
+	password := string(awaitSecret(t, ctx, harness.client, user.Spec.Password.Generated.SecretName).Data["password"])
+
+	dexHarness.restart(t)
+	awaitRemoteConnector(t, ctx, harness, connector.Spec.ID, func(observed *dexapi.Connector) bool {
+		equal, _ := connectorConfigEqual(connectorConfig, observed.GetConfig())
+		return equal
+	})
+	awaitRemoteOAuth2Client(t, ctx, harness, oauth.Spec.ID, func(observed *dexapi.Client) bool {
+		return observed.GetSecret() == clientSecret
+	})
+	awaitPasswordVerification(t, ctx, harness, user.Spec.Email, password, true)
+	if got := string(awaitSecret(t, ctx, harness.client, oauth.Spec.Secret.Generated.SecretName).Data["clientSecret"]); got != clientSecret {
+		t.Fatal("restart replay rotated the generated OAuth2 client Secret")
+	}
+	if got := string(awaitSecret(t, ctx, harness.client, user.Spec.Password.Generated.SecretName).Data["password"]); got != password {
+		t.Fatal("restart replay rotated the generated local-user password")
+	}
+}
+
+func TestSecretSafety(t *testing.T) {
+	dexHarness := startDexHarness(t, memoryStorage)
+	harness := startKubernetesHarness(t, dexHarness)
+	ctx := context.Background()
+
+	connectorSecret := `{"token":"sentinel-connector-secret-3fcb2d"}`
+	mustCreateConfigSecret(t, ctx, harness.client, "secret-safety-connector", []byte(connectorSecret))
+	connector := newConnector("secret-safety-connector", "secret-safety-connector")
+	oauthSecret := "sentinel-oauth-secret-02d6e1"
+	mustCreateOpaqueSecret(t, ctx, harness.client, "secret-safety-oauth", map[string][]byte{"clientSecret": []byte(oauthSecret)})
+	oauth := newConfidentialOAuth2Client("secret-safety-oauth")
+	oauth.Spec.Secret = &dexv1alpha1.DexOAuth2ClientSecretSpec{ProvidedSecretRef: &dexv1alpha1.SecretKeyReference{Name: "secret-safety-oauth", Key: "clientSecret"}}
+	user := newGeneratedLocalUser("secret-safety-user", "secret-safety@example.com", "secret-safety-subject", "secret-safety-user")
+	for _, resource := range []client.Object{connector, oauth, user} {
+		mustCreate(t, ctx, harness.client, resource)
+	}
+	managedConnector := awaitReadyConnector(t, ctx, harness.client, connector.Name)
+	managedOAuth := awaitReadyOAuth2Client(t, ctx, harness.client, oauth.Name)
+	managedUser := awaitReadyLocalUser(t, ctx, harness.client, user.Name)
+	generated := awaitSecret(t, ctx, harness.client, user.Spec.Password.Generated.SecretName)
+	clientKey, err := os.ReadFile(dexHarness.clientTLS.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	status, err := json.Marshal([]any{managedConnector.Status, managedOAuth.Status, managedUser.Status})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := &corev1.EventList{}
+	if err := harness.client.List(ctx, events, client.InNamespace("default")); err != nil {
+		t.Fatal(err)
+	}
+	eventJSON, err := json.Marshal(events.Items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{
+		connectorSecret,
+		oauthSecret,
+		string(generated.Data["password"]),
+		string(generated.Data["bcryptHash"]),
+		string(clientKey),
+	} {
+		for name, observed := range map[string]string{
+			"status": string(status),
+			"logs":   harness.logs.String(),
+			"events": string(eventJSON),
+		} {
+			if strings.Contains(observed, secret) {
+				t.Fatalf("%s exposed secret material", name)
+			}
+		}
+	}
+}
 
 func TestDexLocalUser(t *testing.T) {
 	dexHarness := startDexHarness(t, memoryStorage)
@@ -627,7 +737,7 @@ func getSecret(t *testing.T, ctx context.Context, kube client.Client, name strin
 
 func awaitReadyConnector(t *testing.T, ctx context.Context, kube client.Client, name string) *dexv1alpha1.DexConnector {
 	t.Helper()
-	return awaitCondition(t, ctx, kube, name, dexv1alpha1.ConditionReady, metav1.ConditionTrue, controller.ReasonConverged)
+	return awaitReadyConnectorAfter(t, ctx, kube, name, -1)
 }
 
 func awaitReadyConnectorAfter(t *testing.T, ctx context.Context, kube client.Client, name string, generation int64) *dexv1alpha1.DexConnector {
@@ -638,8 +748,7 @@ func awaitReadyConnectorAfter(t *testing.T, ctx context.Context, kube client.Cli
 		if err := kube.Get(ctx, types.NamespacedName{Namespace: "default", Name: name}, resource); err != nil {
 			return false, err
 		}
-		condition := meta.FindStatusCondition(resource.Status.Conditions, dexv1alpha1.ConditionReady)
-		if resource.Generation > generation && condition != nil && condition.ObservedGeneration == resource.Generation && condition.Status == metav1.ConditionTrue && condition.Reason == controller.ReasonConverged {
+		if resource.Generation > generation && readyConditionSet(resource.Status.Conditions, resource.Generation) {
 			result = resource
 			return true, nil
 		}
@@ -836,7 +945,7 @@ func getOAuth2Client(t *testing.T, ctx context.Context, kube client.Client, name
 
 func awaitReadyOAuth2Client(t *testing.T, ctx context.Context, kube client.Client, name string) *dexv1alpha1.DexOAuth2Client {
 	t.Helper()
-	return awaitOAuth2Condition(t, ctx, kube, name, metav1.ConditionTrue, controller.ReasonConverged)
+	return awaitReadyOAuth2ClientAfter(t, ctx, kube, name, -1)
 }
 
 func awaitReadyOAuth2ClientAfter(t *testing.T, ctx context.Context, kube client.Client, name string, generation int64) *dexv1alpha1.DexOAuth2Client {
@@ -847,8 +956,7 @@ func awaitReadyOAuth2ClientAfter(t *testing.T, ctx context.Context, kube client.
 		if err := kube.Get(ctx, types.NamespacedName{Namespace: "default", Name: name}, resource); err != nil {
 			return false, err
 		}
-		condition := meta.FindStatusCondition(resource.Status.Conditions, dexv1alpha1.ConditionReady)
-		if resource.Generation > generation && condition != nil && condition.ObservedGeneration == resource.Generation && condition.Status == metav1.ConditionTrue && condition.Reason == controller.ReasonConverged {
+		if resource.Generation > generation && readyConditionSet(resource.Status.Conditions, resource.Generation) {
 			result = resource
 			return true, nil
 		}
@@ -1060,12 +1168,41 @@ func getLocalUser(t *testing.T, ctx context.Context, kube client.Client, name st
 
 func awaitReadyLocalUser(t *testing.T, ctx context.Context, kube client.Client, name string) *dexv1alpha1.DexLocalUser {
 	t.Helper()
-	return awaitLocalUserCondition(t, ctx, kube, name, metav1.ConditionTrue, controller.ReasonConverged)
+	return awaitReadyLocalUserAfter(t, ctx, kube, name, -1)
 }
 
 func awaitReadyLocalUserAfter(t *testing.T, ctx context.Context, kube client.Client, name string, generation int64) *dexv1alpha1.DexLocalUser {
 	t.Helper()
-	return awaitLocalUserConditionAfter(t, ctx, kube, name, generation, metav1.ConditionTrue, controller.ReasonConverged)
+	var result *dexv1alpha1.DexLocalUser
+	eventually(t, func() (bool, error) {
+		resource := &dexv1alpha1.DexLocalUser{}
+		if err := kube.Get(ctx, types.NamespacedName{Namespace: "default", Name: name}, resource); err != nil {
+			return false, err
+		}
+		if resource.Generation > generation && readyConditionSet(resource.Status.Conditions, resource.Generation) {
+			result = resource
+			return true, nil
+		}
+		return false, nil
+	})
+	return result
+}
+
+func readyConditionSet(conditions []metav1.Condition, generation int64) bool {
+	for _, expected := range []struct {
+		conditionType string
+		status        metav1.ConditionStatus
+	}{
+		{dexv1alpha1.ConditionReady, metav1.ConditionTrue},
+		{dexv1alpha1.ConditionCompatible, metav1.ConditionTrue},
+		{dexv1alpha1.ConditionDrifted, metav1.ConditionFalse},
+	} {
+		condition := meta.FindStatusCondition(conditions, expected.conditionType)
+		if condition == nil || condition.ObservedGeneration != generation || condition.Status != expected.status || condition.Reason != controller.ReasonConverged {
+			return false
+		}
+	}
+	return true
 }
 
 func awaitLocalUserCondition(t *testing.T, ctx context.Context, kube client.Client, name string, status metav1.ConditionStatus, reason string) *dexv1alpha1.DexLocalUser {

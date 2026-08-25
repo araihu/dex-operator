@@ -7,6 +7,7 @@ toolchain go1.26.5
 require (
 	github.com/caarlos0/env/v11 v11.4.1
 	github.com/dexidp/dex/api/v2 v2.4.1-0.20260806151424-ab64ed778070
+	github.com/moby/moby/api v1.55.0
 	github.com/testcontainers/testcontainers-go v0.44.0
 	golang.org/x/crypto v0.55.0
 	google.golang.org/grpc v1.82.0
@@ -79,7 +80,6 @@ require (
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
 	github.com/moby/go-archive v0.2.0 // indirect
-	github.com/moby/moby/api v1.55.0 // indirect
 	github.com/moby/moby/client v0.5.0 // indirect
 	github.com/moby/patternmatcher v0.6.1 // indirect
 	github.com/moby/sys/sequential v0.7.0 // indirect

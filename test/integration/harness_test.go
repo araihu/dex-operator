@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -14,11 +15,14 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,14 +30,19 @@ import (
 	"github.com/araihu/dex-operator/internal/config"
 	"github.com/araihu/dex-operator/internal/controller"
 	dexclient "github.com/araihu/dex-operator/internal/dex"
+	dockercontainer "github.com/moby/moby/api/types/container"
+	dockernetwork "github.com/moby/moby/api/types/network"
 	"github.com/testcontainers/testcontainers-go"
 	tcnetwork "github.com/testcontainers/testcontainers-go/network"
 	"github.com/testcontainers/testcontainers-go/wait"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
@@ -116,6 +125,31 @@ func TestHarnessCompatibility(t *testing.T) {
 	})
 }
 
+func TestCompatibilityBlocksMutations(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		expectedVersion string
+		connectorsCRUD  bool
+		identitiesCRUD  bool
+	}{
+		{name: "server version mismatch", expectedVersion: "unsupported", connectorsCRUD: true, identitiesCRUD: true},
+		{name: "connector CRUD disabled", expectedVersion: config.SupportedServerVersion, identitiesCRUD: true},
+		{name: "identity CRUD disabled", expectedVersion: config.SupportedServerVersion, connectorsCRUD: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dexHarness := startDexHarnessWithFeatures(t, memoryStorage, test.connectorsCRUD, test.identitiesCRUD)
+			harness := startKubernetesHarnessExpectedVersion(t, dexHarness, test.expectedVersion)
+			ctx := context.Background()
+			resource := newPublicOAuth2Client("blocked-client")
+			mustCreate(t, ctx, harness.client, resource)
+			awaitOAuth2Condition(t, ctx, harness.client, resource.Name, metav1.ConditionFalse, controller.ReasonIncompatibleDex)
+			if observed := remoteOAuth2Client(t, ctx, harness, resource.Spec.ID); observed != nil {
+				t.Fatalf("incompatible Dex mutation created client %#v", observed)
+			}
+		})
+	}
+}
+
 type dexStorage string
 
 const memoryStorage dexStorage = "memory"
@@ -188,6 +222,10 @@ func (harness *dexHarness) restart(t *testing.T) {
 }
 
 func startDexHarness(t *testing.T, storage dexStorage) *dexHarness {
+	return startDexHarnessWithFeatures(t, storage, true, true)
+}
+
+func startDexHarnessWithFeatures(t *testing.T, storage dexStorage, connectorsCRUD, identitiesCRUD bool) *dexHarness {
 	t.Helper()
 	ensureDockerHost(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -205,8 +243,8 @@ func startDexHarness(t *testing.T, storage dexStorage) *dexHarness {
 	}
 	options := []testcontainers.ContainerCustomizer{
 		testcontainers.WithEnv(map[string]string{
-			"DEX_API_CONNECTORS_CRUD":          "true",
-			"DEX_API_SESSIONS_IDENTITIES_CRUD": "true",
+			"DEX_API_CONNECTORS_CRUD":          strconv.FormatBool(connectorsCRUD),
+			"DEX_API_SESSIONS_IDENTITIES_CRUD": strconv.FormatBool(identitiesCRUD),
 		}),
 		testcontainers.WithExposedPorts("5556/tcp", "5557/tcp"),
 		testcontainers.WithFiles(
@@ -222,7 +260,16 @@ func startDexHarness(t *testing.T, storage dexStorage) *dexHarness {
 	volumeName := ""
 	if storage == sqliteStorage {
 		volumeName = fmt.Sprintf("dex-operator-test-%d", time.Now().UnixNano())
-		options = append(options, testcontainers.WithMounts(testcontainers.VolumeMount(volumeName, "/var/dex")))
+		httpHostPort, grpcHostPort := strconv.Itoa(freeTCPPort(t)), strconv.Itoa(freeTCPPort(t))
+		options = append(options,
+			testcontainers.WithMounts(testcontainers.VolumeMount(volumeName, "/var/dex")),
+			testcontainers.WithHostConfigModifier(func(hostConfig *dockercontainer.HostConfig) {
+				hostConfig.PortBindings = dockernetwork.PortMap{
+					dockernetwork.MustParsePort("5556/tcp"): {{HostIP: netip.MustParseAddr("127.0.0.1"), HostPort: httpHostPort}},
+					dockernetwork.MustParsePort("5557/tcp"): {{HostIP: netip.MustParseAddr("127.0.0.1"), HostPort: grpcHostPort}},
+				}
+			}),
+		)
 	}
 
 	container, err := testcontainers.Run(ctx, "dex-operator-test-dex:ab64ed778070", options...)
@@ -254,6 +301,19 @@ func startDexHarness(t *testing.T, storage dexStorage) *dexHarness {
 		container:   container,
 		network:     dexNetwork,
 	}
+}
+
+func freeTCPPort(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return port
 }
 
 func ensureDockerHost(t *testing.T) {
@@ -395,9 +455,31 @@ func writeFile(t *testing.T, directory, name string, contents []byte) string {
 type kubernetesHarness struct {
 	client    client.Client
 	dexClient *dexclient.Client
+	logs      *synchronizedBuffer
+}
+
+type synchronizedBuffer struct {
+	mu sync.Mutex
+	bytes.Buffer
+}
+
+func (buffer *synchronizedBuffer) Write(data []byte) (int, error) {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.Buffer.Write(data)
+}
+
+func (buffer *synchronizedBuffer) String() string {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.Buffer.String()
 }
 
 func startKubernetesHarness(t *testing.T, dexHarness *dexHarness) *kubernetesHarness {
+	return startKubernetesHarnessExpectedVersion(t, dexHarness, config.SupportedServerVersion)
+}
+
+func startKubernetesHarnessExpectedVersion(t *testing.T, dexHarness *dexHarness, expectedVersion string) *kubernetesHarness {
 	t.Helper()
 	repository := repositoryRoot(t)
 	assets := envtestAssets(t, repository)
@@ -423,7 +505,13 @@ func startKubernetesHarness(t *testing.T, dexHarness *dexHarness) *kubernetesHar
 	if err := dexv1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	manager, err := ctrl.NewManager(restConfig, ctrl.Options{Scheme: scheme, Metrics: metricsserver.Options{BindAddress: "0"}, HealthProbeBindAddress: "0"})
+	skipControllerNameValidation := true
+	logs := &synchronizedBuffer{}
+	ctrl.SetLogger(zap.New(zap.WriteTo(logs), zap.UseDevMode(true)))
+	manager, err := ctrl.NewManager(restConfig, ctrl.Options{
+		Scheme: scheme, Metrics: metricsserver.Options{BindAddress: "0"}, HealthProbeBindAddress: "0",
+		Controller: ctrlconfig.Controller{SkipNameValidation: &skipControllerNameValidation},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -437,7 +525,7 @@ func startKubernetesHarness(t *testing.T, dexHarness *dexHarness) *kubernetesHar
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = dexAPI.Close() })
-	compatibilityGate := dexclient.NewCompatibilityGate(dexAPI, config.SupportedServerVersion)
+	compatibilityGate := dexclient.NewCompatibilityGate(dexAPI, expectedVersion)
 	for name, setup := range map[string]func() error{
 		"local user": func() error {
 			return (&controller.DexLocalUserReconciler{
@@ -484,7 +572,7 @@ func startKubernetesHarness(t *testing.T, dexHarness *dexHarness) *kubernetesHar
 			t.Errorf("stop controller manager: %v", err)
 		}
 	})
-	return &kubernetesHarness{client: manager.GetClient(), dexClient: dexAPI}
+	return &kubernetesHarness{client: manager.GetClient(), dexClient: dexAPI, logs: logs}
 }
 
 func repositoryRoot(t *testing.T) string {

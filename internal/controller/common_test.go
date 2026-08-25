@@ -92,10 +92,22 @@ func TestSecretLoadingAndIndexedMapping(t *testing.T) {
 	unrelated.Spec.Password.HashSecretRef.Name = "other-secret"
 	crossNamespace := user.DeepCopy()
 	crossNamespace.Namespace = "other"
+	oauth := &dexv1alpha1.DexOAuth2Client{
+		ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: "default"},
+		Spec: dexv1alpha1.DexOAuth2ClientSpec{Secret: &dexv1alpha1.DexOAuth2ClientSecretSpec{
+			ProvidedSecretRef: &dexv1alpha1.SecretKeyReference{Name: "credentials", Key: "password"},
+		}},
+	}
+	connector := &dexv1alpha1.DexConnector{
+		ObjectMeta: metav1.ObjectMeta{Name: "oidc", Namespace: "default"},
+		Spec:       dexv1alpha1.DexConnectorSpec{ConfigSecretRef: dexv1alpha1.SecretKeyReference{Name: "credentials", Key: "config.json"}},
+	}
 
 	kube := fake.NewClientBuilder().WithScheme(scheme).
-		WithObjects(secret, otherNamespace, user, unrelated, crossNamespace).
+		WithObjects(secret, otherNamespace, user, unrelated, crossNamespace, oauth, connector).
 		WithIndex(&dexv1alpha1.DexLocalUser{}, LocalUserSecretIndex, localUserSecretNames).
+		WithIndex(&dexv1alpha1.DexOAuth2Client{}, OAuth2ClientSecretIndex, oauth2ClientSecretNames).
+		WithIndex(&dexv1alpha1.DexConnector{}, ConnectorSecretIndex, connectorSecretNames).
 		Build()
 
 	value, resourceVersion, err := LoadSecretValue(ctx, kube, user, *user.Spec.Password.HashSecretRef)
@@ -111,6 +123,22 @@ func TestSecretLoadingAndIndexedMapping(t *testing.T) {
 	}
 	if got, want := requestNames(requests), []string{"default/admin"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("SecretRequests() = %#v, want %#v", got, want)
+	}
+	for _, mapping := range []struct {
+		list  client.ObjectList
+		index string
+		want  []string
+	}{
+		{&dexv1alpha1.DexOAuth2ClientList{}, OAuth2ClientSecretIndex, []string{"default/app"}},
+		{&dexv1alpha1.DexConnectorList{}, ConnectorSecretIndex, []string{"default/oidc"}},
+	} {
+		requests, err := SecretRequests(ctx, kube, secret, mapping.list, mapping.index)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := requestNames(requests); !reflect.DeepEqual(got, mapping.want) {
+			t.Fatalf("SecretRequests(%s) = %#v, want %#v", mapping.index, got, mapping.want)
+		}
 	}
 
 	marker := "sentinel-secret-value"
