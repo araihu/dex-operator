@@ -25,12 +25,13 @@ race:
 	GOWORK=off go test -race ./... -count=1
 
 build:
-	GOWORK=off go build ./cmd/...
+	mkdir -p bin
+	GOWORK=off go build -trimpath -o bin/manager ./cmd
 
 docker-build:
 	docker build -t dex-operator:local .
 
 verify: verify-generated test race
 	GOWORK=off go vet ./...
-	GOWORK=off go build ./cmd/...
+	$(MAKE) build
 	git diff --check
