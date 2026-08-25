@@ -1,0 +1,9 @@
+apiVersion: dex.araihu.com/v1alpha1
+kind: DexLocalUser
+metadata:
+  labels:
+    app.kubernetes.io/name: dex-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: dexlocaluser-sample
+spec:
+  # TODO(user): Add fields here

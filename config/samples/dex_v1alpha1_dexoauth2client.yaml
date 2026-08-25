@@ -1,0 +1,9 @@
+apiVersion: dex.araihu.com/v1alpha1
+kind: DexOAuth2Client
+metadata:
+  labels:
+    app.kubernetes.io/name: dex-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: dexoauth2client-sample
+spec:
+  # TODO(user): Add fields here

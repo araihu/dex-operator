@@ -1,0 +1,6 @@
+## Append samples of your project ##
+resources:
+- dex_v1alpha1_dexlocaluser.yaml
+- dex_v1alpha1_dexoauth2client.yaml
+- dex_v1alpha1_dexconnector.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples
