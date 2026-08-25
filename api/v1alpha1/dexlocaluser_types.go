@@ -21,38 +21,151 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+// PasswordCharacterSet selects one generated-password character class.
+// +kubebuilder:validation:Enum=letters;numbers;symbols
+type PasswordCharacterSet string
 
-// DexLocalUserSpec defines the desired state of DexLocalUser
-type DexLocalUserSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
+const (
+	// PasswordCharacterSetLetters enables ASCII upper- and lower-case letters.
+	PasswordCharacterSetLetters PasswordCharacterSet = "letters"
+	// PasswordCharacterSetNumbers enables decimal digits.
+	PasswordCharacterSetNumbers PasswordCharacterSet = "numbers"
+	// PasswordCharacterSetSymbols enables the operator's documented symbol set.
+	PasswordCharacterSetSymbols PasswordCharacterSet = "symbols"
+)
 
-	// foo is an example field of DexLocalUser. Edit dexlocaluser_types.go to remove/update
+// GeneratedPasswordSpec configures a generated local-user password.
+type GeneratedPasswordSpec struct {
+	// SecretName receives the generated password and bcrypt hash.
+	// +kubebuilder:validation:MinLength=1
+	SecretName string `json:"secretName"`
+	// Length is the generated password length.
+	// +kubebuilder:validation:Minimum=16
+	// +kubebuilder:validation:Maximum=128
+	Length int32 `json:"length"`
+	// CharacterSets selects at least one permitted character class.
+	// +listType=set
+	// +kubebuilder:validation:MinItems=1
+	CharacterSets []PasswordCharacterSet `json:"characterSets"`
+	// RotationNonce authorizes generating and applying a replacement password when changed.
 	// +optional
-	Foo *string `json:"foo,omitempty"`
+	RotationNonce string `json:"rotationNonce,omitempty"`
 }
 
-// DexLocalUserStatus defines the observed state of DexLocalUser.
+// DexLocalUserPasswordSpec selects a provided bcrypt hash or generated password.
+// +kubebuilder:validation:XValidation:rule="has(self.hashSecretRef) != has(self.generated)",message="exactly one of hashSecretRef or generated is required"
+type DexLocalUserPasswordSpec struct {
+	// HashSecretRef selects a provided bcrypt hash.
+	// +optional
+	HashSecretRef *SecretKeyReference `json:"hashSecretRef,omitempty"`
+	// Generated configures an operator-generated password.
+	// +optional
+	Generated *GeneratedPasswordSpec `json:"generated,omitempty"`
+}
+
+// DexLocalUserMFASpec configures supported MFA reset and device-removal operations.
+type DexLocalUserMFASpec struct {
+	// ResetNonce authorizes clearing all enrolled MFA devices when changed.
+	// +optional
+	ResetNonce string `json:"resetNonce,omitempty"`
+	// RemoveAuthenticatorIDs are authenticator IDs that must remain absent.
+	// +listType=set
+	// +optional
+	RemoveAuthenticatorIDs []string `json:"removeAuthenticatorIDs,omitempty"`
+	// RemoveWebAuthnCredentialIDs are unpadded base64url credential IDs that must remain absent.
+	// +listType=set
+	// +kubebuilder:validation:items:Pattern="^[A-Za-z0-9_-]+$"
+	// +optional
+	RemoveWebAuthnCredentialIDs []string `json:"removeWebAuthnCredentialIDs,omitempty"`
+}
+
+// DexLocalUserSpec defines the desired state of a Dex local user.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.userID) || self.userID == oldSelf.userID",message="userID is immutable once specified"
+type DexLocalUserSpec struct {
+	// Email is the immutable Dex password-record key.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="email is immutable"
+	Email string `json:"email"`
+	// Username is the mutable display name.
+	// +kubebuilder:validation:MinLength=1
+	Username string `json:"username"`
+	// UserID is the immutable OIDC subject. The operator derives it when omitted.
+	// +kubebuilder:validation:MinLength=1
+	// +optional
+	UserID string `json:"userID,omitempty"`
+	// Password selects provided or generated credential material.
+	Password DexLocalUserPasswordSpec `json:"password"`
+	// MFA configures inventory reset and removal operations.
+	// +optional
+	MFA *DexLocalUserMFASpec `json:"mfa,omitempty"`
+	// AdoptExisting authorizes takeover of an unowned matching Dex record.
+	// +kubebuilder:default=false
+	AdoptExisting bool `json:"adoptExisting,omitempty"`
+	// DeletionPolicy controls cleanup of Dex state and generated Secrets.
+	// +kubebuilder:default=Delete
+	DeletionPolicy DeletionPolicy `json:"deletionPolicy,omitempty"`
+}
+
+// WebAuthnCredentialStatus contains non-secret WebAuthn metadata returned by Dex.
+type WebAuthnCredentialStatus struct {
+	// CredentialID is an unpadded base64url identifier.
+	CredentialID string `json:"credentialID"`
+	// DisplayName is the user-visible device name.
+	// +optional
+	DisplayName string `json:"displayName,omitempty"`
+	// Transports reports supported authenticator transports.
+	// +listType=set
+	// +optional
+	Transports []string `json:"transports,omitempty"`
+	// BackupEligible reports whether the credential can be backed up.
+	BackupEligible bool `json:"backupEligible"`
+	// BackupState reports whether the credential is currently backed up.
+	BackupState bool `json:"backupState"`
+	// CloneWarning reports a possible cloned authenticator.
+	CloneWarning bool `json:"cloneWarning"`
+	// CreatedAt is the registration time when Dex reports one.
+	// +optional
+	CreatedAt *metav1.Time `json:"createdAt,omitempty"`
+}
+
+// MFADeviceStatus contains non-secret MFA device metadata returned by Dex.
+type MFADeviceStatus struct {
+	// AuthenticatorID identifies the configured Dex authenticator.
+	AuthenticatorID string `json:"authenticatorID"`
+	// Type is the Dex authenticator type.
+	// +optional
+	Type string `json:"type,omitempty"`
+	// Confirmed reports whether enrollment completed.
+	Confirmed bool `json:"confirmed"`
+	// CreatedAt is the enrollment time when Dex reports one.
+	// +optional
+	CreatedAt *metav1.Time `json:"createdAt,omitempty"`
+	// WebAuthnCredentials contains non-secret credential metadata.
+	// +optional
+	WebAuthnCredentials []WebAuthnCredentialStatus `json:"webAuthnCredentials,omitempty"`
+}
+
+// DexLocalUserStatus defines the observed state of a Dex local user.
 type DexLocalUserStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
-
-	// conditions represent the current state of the DexLocalUser resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
+	// ResolvedUserID is both the derived/explicit ID and the external ownership preclaim.
+	// +optional
+	ResolvedUserID string `json:"resolvedUserID,omitempty"`
+	// HandledRotationNonce is the last successfully applied generated-credential nonce.
+	// +optional
+	HandledRotationNonce string `json:"handledRotationNonce,omitempty"`
+	// HandledMFAResetNonce is the last successfully applied MFA reset nonce.
+	// +optional
+	HandledMFAResetNonce string `json:"handledMFAResetNonce,omitempty"`
+	// AppliedSecretResourceVersion is the last converged input/generated Secret version.
+	// +optional
+	AppliedSecretResourceVersion string `json:"appliedSecretResourceVersion,omitempty"`
+	// MFADevices contains only non-secret device metadata.
+	// +optional
+	MFADevices []MFADeviceStatus `json:"mfaDevices,omitempty"`
+	// ObservedGeneration is the most recent converged or evaluated spec generation.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	// Conditions report Ready, Compatible, and Drifted state.
 	// +listType=map
 	// +listMapKey=type
 	// +optional
@@ -61,27 +174,19 @@ type DexLocalUserStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:resource:scope=Namespaced
 
-// DexLocalUser is the Schema for the dexlocalusers API
+// DexLocalUser is the Schema for the dexlocalusers API.
 type DexLocalUser struct {
-	metav1.TypeMeta `json:",inline"`
-
-	// metadata is a standard object metadata
-	// +optional
+	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitzero"`
-
-	// spec defines the desired state of DexLocalUser
-	// +required
-	Spec DexLocalUserSpec `json:"spec"`
-
-	// status defines the observed state of DexLocalUser
-	// +optional
-	Status DexLocalUserStatus `json:"status,omitzero"`
+	Spec              DexLocalUserSpec   `json:"spec"`
+	Status            DexLocalUserStatus `json:"status,omitzero"`
 }
 
 // +kubebuilder:object:root=true
 
-// DexLocalUserList contains a list of DexLocalUser
+// DexLocalUserList contains a list of DexLocalUser.
 type DexLocalUserList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitzero"`

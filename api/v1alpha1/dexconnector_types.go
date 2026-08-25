@@ -21,38 +21,45 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
-// DexConnectorSpec defines the desired state of DexConnector
+// DexConnectorSpec defines the desired state of a Dex connector.
 type DexConnectorSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
-
-	// foo is an example field of DexConnector. Edit dexconnector_types.go to remove/update
+	// ID is the immutable Dex connector identifier.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="id is immutable"
+	ID string `json:"id"`
+	// Type is the immutable Dex connector type.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="type is immutable"
+	Type string `json:"type"`
+	// Name is the mutable display name.
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+	// ConfigSecretRef selects exact connector JSON bytes.
+	ConfigSecretRef SecretKeyReference `json:"configSecretRef"`
+	// GrantTypes restricts OAuth2 grant types. Empty means unrestricted.
+	// +listType=set
 	// +optional
-	Foo *string `json:"foo,omitempty"`
+	GrantTypes []string `json:"grantTypes,omitempty"`
+	// AdoptExisting authorizes takeover of an unowned matching Dex record.
+	// +kubebuilder:default=false
+	AdoptExisting bool `json:"adoptExisting,omitempty"`
+	// DeletionPolicy controls cleanup of Dex state.
+	// +kubebuilder:default=Delete
+	DeletionPolicy DeletionPolicy `json:"deletionPolicy,omitempty"`
 }
 
-// DexConnectorStatus defines the observed state of DexConnector.
+// DexConnectorStatus defines observed non-secret state.
 type DexConnectorStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
-
-	// conditions represent the current state of the DexConnector resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
+	// ExternalID is the Dex connector ID ownership preclaim.
+	// +optional
+	ExternalID string `json:"externalID,omitempty"`
+	// AppliedSecretResourceVersion is the last converged config Secret version.
+	// +optional
+	AppliedSecretResourceVersion string `json:"appliedSecretResourceVersion,omitempty"`
+	// ObservedGeneration is the most recent converged or evaluated spec generation.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	// Conditions report Ready, Compatible, and Drifted state.
 	// +listType=map
 	// +listMapKey=type
 	// +optional
@@ -61,27 +68,19 @@ type DexConnectorStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:resource:scope=Namespaced
 
-// DexConnector is the Schema for the dexconnectors API
+// DexConnector is the Schema for the dexconnectors API.
 type DexConnector struct {
-	metav1.TypeMeta `json:",inline"`
-
-	// metadata is a standard object metadata
-	// +optional
+	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitzero"`
-
-	// spec defines the desired state of DexConnector
-	// +required
-	Spec DexConnectorSpec `json:"spec"`
-
-	// status defines the observed state of DexConnector
-	// +optional
-	Status DexConnectorStatus `json:"status,omitzero"`
+	Spec              DexConnectorSpec   `json:"spec"`
+	Status            DexConnectorStatus `json:"status,omitzero"`
 }
 
 // +kubebuilder:object:root=true
 
-// DexConnectorList contains a list of DexConnector
+// DexConnectorList contains a list of DexConnector.
 type DexConnectorList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitzero"`
