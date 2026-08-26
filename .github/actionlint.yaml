@@ -1,0 +1,4 @@
+self-hosted-runner:
+  labels:
+    - hostinger-vps-pr
+    - hostinger-vps-trusted

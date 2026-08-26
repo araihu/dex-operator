@@ -1,0 +1,88 @@
+name: Publish operator image
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-dex-operator-image
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/araihu/dex-operator
+
+jobs:
+  publish:
+    name: Verify and publish
+    if: github.repository == 'araihu/dex-operator' && github.ref == 'refs/heads/main' && github.actor == 'guilycst'
+    runs-on: [self-hosted, Linux, X64, hostinger-vps-trusted]
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify source and real-Dex integration
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          make verify
+          make test-integration
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        with:
+          driver-opts: image=moby/buildkit:buildx-stable-1@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
+
+      - name: Log in to GHCR after verification
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and publish immutable candidate
+        id: publish
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          pull: true
+          push: true
+          tags: ${{ env.IMAGE }}:sha-${{ github.sha }}-run-${{ github.run_id }}-${{ github.run_attempt }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/araihu/dex-operator
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
+
+      - name: Verify candidate and promote main
+        env:
+          DIGEST: ${{ steps.publish.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          docker buildx imagetools inspect --raw "$IMAGE@$DIGEST" | jq -e '
+            [.manifests[] | select(.platform.os == "linux") | .platform.architecture] | sort == ["amd64", "arm64"]
+          ' >/dev/null
+          docker pull "$IMAGE@$DIGEST"
+          docker run --rm "$IMAGE@$DIGEST" --help >/dev/null
+          docker buildx imagetools create --tag "$IMAGE:main" "$IMAGE@$DIGEST"
+          main_digest=$(docker buildx imagetools inspect "$IMAGE:main" --format '{{json .Manifest}}' | jq -er '.digest')
+          test "$main_digest" = "$DIGEST"
+          printf 'Published `%s@%s`\n' "$IMAGE" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"
