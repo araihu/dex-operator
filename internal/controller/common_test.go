@@ -76,6 +76,22 @@ func TestOwnershipPreclaimAndFinalizer(t *testing.T) {
 	}
 }
 
+func TestRemoveFinalizerIgnoresAlreadyDeletedObject(t *testing.T) {
+	ctx := context.Background()
+	user := &dexv1alpha1.DexLocalUser{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "admin",
+			Namespace:  "default",
+			Finalizers: []string{Finalizer},
+		},
+	}
+	kube := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+
+	if err := RemoveFinalizer(ctx, kube, user); err != nil {
+		t.Fatalf("RemoveFinalizer() error = %v, want nil", err)
+	}
+}
+
 func TestSecretLoadingAndIndexedMapping(t *testing.T) {
 	ctx := context.Background()
 	scheme := testScheme(t)
