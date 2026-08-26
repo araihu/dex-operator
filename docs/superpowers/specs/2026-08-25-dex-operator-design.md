@@ -260,15 +260,13 @@ If Dex is unavailable, deletion remains blocked and status reports a sanitized f
 
 ## Compatibility strategy
 
-The initial compatibility tuple is exact:
+The initial reviewed build contract is exact:
 
 - Dex source SHA `ab64ed778070e983cbb10cfc07ea4bb397d14312`;
 - matching `github.com/dexidp/dex/api/v2` pseudo-version;
-- Dex numeric API version `4`;
-- image identity remains Helm/GitOps-owned and may use any syntactically valid OCI reference; the selected image is pinned by digest and must expose the exact reviewed tuple;
-- exact commit-derived `GetVersion.server` value configured in the operator.
+- image identity remains Helm/GitOps-owned and may use any syntactically valid, digest-pinned OCI reference.
 
-Startup/readiness checks `GetVersion`, then performs read-only `ListConnectors` and `ListUserIdentities` capability probes to verify the required feature flags. A version, API, or capability mismatch fails readiness, sets `Compatible=False` on reconciled resources, and blocks mutations. Probe results are discarded and never logged. The operator does not assume that a newer API is compatible.
+The runtime compatibility gate is limited to values Dex exposes over gRPC: numeric API version `4`, the exact commit-derived `GetVersion.server` value configured in the operator, and successful read-only `ListConnectors` and `ListUserIdentities` capability probes. A version, API, or capability mismatch fails readiness, sets `Compatible=False` on reconciled resources, and blocks mutations. Probe results are discarded and never logged. The operator does not assume that a newer API is compatible.
 
 Dex must set:
 
@@ -279,7 +277,7 @@ DEX_API_SESSIONS_IDENTITIES_CRUD=true
 
 Moving to another Dex commit requires one reviewed change that updates the API dependency, expected server/API versions, compatibility tests, and documented behavior changes. Changing only registry or repository identity does not require an operator change when the runtime tuple remains compatible.
 
-The operator does not receive or inspect the Dex image reference. Reference syntax validation, digest pinning, image publication, and rollout belong to Helm/GitOps integration. Operator tests build the reviewed source locally without publishing it.
+The operator does not receive or inspect the Dex image reference, source SHA, or API-module provenance. Reference syntax validation, digest pinning, image publication, and rollout belong to Helm/GitOps integration. When an integration claims the reviewed build, it must verify signed image provenance against the recorded digest and source SHA. Operator tests build the reviewed source locally without publishing it.
 
 ## Security boundaries
 
