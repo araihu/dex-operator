@@ -158,6 +158,33 @@ const sqliteStorage dexStorage = "sqlite"
 
 const webAuthnBrowserImage = "chromedp/headless-shell@sha256:2d349b544a1ea6b5b5fd7c0fe99215ff662339c57407ee2e8c0a11af93516b04"
 
+func TestLoopbackPortBindings(t *testing.T) {
+	hostConfig := &dockercontainer.HostConfig{}
+	loopbackPortBindings(t, "5556/tcp", "5557/tcp")(hostConfig)
+
+	if len(hostConfig.PortBindings) != 2 {
+		t.Fatalf("port bindings = %d, want 2", len(hostConfig.PortBindings))
+	}
+	seenHostPorts := map[string]struct{}{}
+	for _, containerPort := range []string{"5556/tcp", "5557/tcp"} {
+		bindings := hostConfig.PortBindings[dockernetwork.MustParsePort(containerPort)]
+		if len(bindings) != 1 {
+			t.Fatalf("%s bindings = %d, want 1", containerPort, len(bindings))
+		}
+		binding := bindings[0]
+		if binding.HostIP != netip.MustParseAddr("127.0.0.1") {
+			t.Fatalf("%s host IP = %s, want loopback", containerPort, binding.HostIP)
+		}
+		if binding.HostPort == "" {
+			t.Fatalf("%s host port is empty", containerPort)
+		}
+		if _, exists := seenHostPorts[binding.HostPort]; exists {
+			t.Fatalf("host port %s reused", binding.HostPort)
+		}
+		seenHostPorts[binding.HostPort] = struct{}{}
+	}
+}
+
 type dexHarness struct {
 	grpcAddress string
 	httpURL     string
@@ -252,6 +279,7 @@ func startDexHarnessConfigured(t *testing.T, storage dexStorage, connectorsCRUD,
 			"DEX_SESSIONS_ENABLED":             strconv.FormatBool(len(mfaChain) > 0),
 		}),
 		testcontainers.WithExposedPorts("5556/tcp", "5557/tcp"),
+		testcontainers.WithHostConfigModifier(loopbackPortBindings(t, "5556/tcp", "5557/tcp")),
 		testcontainers.WithFiles(
 			testcontainers.ContainerFile{HostFilePath: configPath, ContainerFilePath: "/etc/dex/test.yaml", FileMode: 0o444},
 			testcontainers.ContainerFile{HostFilePath: tlsFiles.serverCert, ContainerFilePath: "/etc/dex/tls.crt", FileMode: 0o444},
@@ -265,15 +293,8 @@ func startDexHarnessConfigured(t *testing.T, storage dexStorage, connectorsCRUD,
 	volumeName := ""
 	if storage == sqliteStorage {
 		volumeName = fmt.Sprintf("dex-operator-test-%d", time.Now().UnixNano())
-		httpHostPort, grpcHostPort := strconv.Itoa(freeTCPPort(t)), strconv.Itoa(freeTCPPort(t))
 		options = append(options,
 			testcontainers.WithMounts(testcontainers.VolumeMount(volumeName, "/var/dex")),
-			testcontainers.WithHostConfigModifier(func(hostConfig *dockercontainer.HostConfig) {
-				hostConfig.PortBindings = dockernetwork.PortMap{
-					dockernetwork.MustParsePort("5556/tcp"): {{HostIP: netip.MustParseAddr("127.0.0.1"), HostPort: httpHostPort}},
-					dockernetwork.MustParsePort("5557/tcp"): {{HostIP: netip.MustParseAddr("127.0.0.1"), HostPort: grpcHostPort}},
-				}
-			}),
 		)
 	}
 
@@ -323,6 +344,7 @@ func startWebAuthnBrowser(t *testing.T, dexHarness *dexHarness) string {
 	defer cancel()
 	container, err := testcontainers.Run(ctx, webAuthnBrowserImage,
 		testcontainers.WithExposedPorts("9222/tcp"),
+		testcontainers.WithHostConfigModifier(loopbackPortBindings(t, "9222/tcp")),
 		testcontainers.WithCmd("--ignore-certificate-errors"),
 		testcontainers.WithWaitStrategy(wait.ForHTTP("/json/version").WithPort("9222/tcp").WithStartupTimeout(30*time.Second)),
 		tcnetwork.WithNetwork([]string{"browser"}, dexHarness.network),
@@ -340,6 +362,20 @@ func startWebAuthnBrowser(t *testing.T, dexHarness *dexHarness) string {
 		t.Fatal(err)
 	}
 	return "http://" + net.JoinHostPort(host, port.Port())
+}
+
+func loopbackPortBindings(t *testing.T, containerPorts ...string) func(*dockercontainer.HostConfig) {
+	t.Helper()
+	bindings := make(dockernetwork.PortMap, len(containerPorts))
+	for _, containerPort := range containerPorts {
+		bindings[dockernetwork.MustParsePort(containerPort)] = []dockernetwork.PortBinding{{
+			HostIP:   netip.MustParseAddr("127.0.0.1"),
+			HostPort: strconv.Itoa(freeTCPPort(t)),
+		}}
+	}
+	return func(hostConfig *dockercontainer.HostConfig) {
+		hostConfig.PortBindings = bindings
+	}
 }
 
 func freeTCPPort(t *testing.T) int {
