@@ -1,6 +1,6 @@
 # Homelab integration handoff
 
-This is a future, approval-gated mapping. No `home-lab` file was changed, no cluster was queried or mutated, and no concrete CNPG cluster, Secret, registry, or image was selected.
+This is a future, approval-gated mapping. No `home-lab` file was changed and no cluster was queried or mutated. A verified Dex image reference is recorded below, but selecting it for the homelab and rolling it out remain separate actions.
 
 ## Ownership
 
@@ -18,7 +18,9 @@ When integration is separately authorized, map Dex PostgreSQL configuration to:
 
 Do not teach the operator these values and do not grant it access to the application Secret. Select the actual cluster and Secret only during the homelab change review.
 
-Dex must use the exact reviewed image described in [compatibility](compatibility.md), with `DEX_API_CONNECTORS_CRUD=true`, `DEX_API_SESSIONS_IDENTITIES_CRUD=true`, and `DEX_SESSIONS_ENABLED=true` when MFA is enabled. This repository does not publish that custom Dex image; registry selection/build/publication is a separate authorization.
+GitOps may configure any syntactically valid Dex image reference; the operator has no registry or repository allowlist. GitOps remains responsible for rejecting malformed references and pinning the selected manifest by digest. The verified `linux/amd64` default candidate for the current compatibility tuple is `ghcr.io/araihu/dex:v0.0.1@sha256:d9ff9b6c2eccd1b59f2c082e61b07fbdc9df4279ad69cf5db19d2b2d51918d23`.
+
+Regardless of image identity, Dex must report the exact server/API tuple described in [compatibility](compatibility.md), with `DEX_API_CONNECTORS_CRUD=true`, `DEX_API_SESSIONS_IDENTITIES_CRUD=true`, and `DEX_SESSIONS_ENABLED=true` when MFA is enabled.
 
 The operator client certificate Secret must have cert-manager keys `ca.crt`, `tls.crt`, and `tls.key`; the configured gRPC server name must exactly match the server certificate. Add Reloader/checksum ownership so Dex and operator restart on the certificate/config Secret changes they consume.
 
@@ -35,7 +37,7 @@ Before step 5, remove matching connectors, clients, and local users from static 
 ## Integration review checklist
 
 - Replace every `.invalid` address and fake Secret name in the generic manifests.
-- Select immutable operator and Dex image digests; publication remains separately authorized.
+- Select syntactically valid, immutable operator and Dex image references pinned by digest.
 - Narrow egress/ingress with the policy in [security](security.md).
 - Review cluster-wide Secret RBAC and who may create each CRD.
 - Confirm Git, Kubernetes/etcd, and CNPG backup/restore coverage.

@@ -265,7 +265,7 @@ The initial compatibility tuple is exact:
 - Dex source SHA `ab64ed778070e983cbb10cfc07ea4bb397d14312`;
 - matching `github.com/dexidp/dex/api/v2` pseudo-version;
 - Dex numeric API version `4`;
-- custom Dex image built from that SHA and pinned by digest;
+- image identity remains Helm/GitOps-owned and may use any syntactically valid OCI reference; the selected image is pinned by digest and must expose the exact reviewed tuple;
 - exact commit-derived `GetVersion.server` value configured in the operator.
 
 Startup/readiness checks `GetVersion`, then performs read-only `ListConnectors` and `ListUserIdentities` capability probes to verify the required feature flags. A version, API, or capability mismatch fails readiness, sets `Compatible=False` on reconciled resources, and blocks mutations. Probe results are discarded and never logged. The operator does not assume that a newer API is compatible.
@@ -277,9 +277,9 @@ DEX_API_CONNECTORS_CRUD=true
 DEX_API_SESSIONS_IDENTITIES_CRUD=true
 ```
 
-Moving to another Dex commit requires one reviewed change that updates the API dependency, expected server/API versions, image digest handoff, compatibility tests, and documented behavior changes.
+Moving to another Dex commit requires one reviewed change that updates the API dependency, expected server/API versions, compatibility tests, and documented behavior changes. Changing only registry or repository identity does not require an operator change when the runtime tuple remains compatible.
 
-The upstream project does not publish an image for each `master` commit. Building and publishing the pinned Dex image is separate integration work requiring explicit authorization. Operator tests build it locally without publishing.
+The operator does not receive or inspect the Dex image reference. Reference syntax validation, digest pinning, image publication, and rollout belong to Helm/GitOps integration. Operator tests build the reviewed source locally without publishing it.
 
 ## Security boundaries
 
@@ -360,7 +360,7 @@ The operator neither schedules CNPG backups nor performs restores.
 
 No `home-lab` files change during operator implementation. The operator repository will document a separately authorized handoff containing:
 
-- exact Dex source SHA, API pseudo-version, custom image digest, and feature flags;
+- exact Dex source SHA, API pseudo-version, a syntactically valid digest-pinned image reference, and feature flags;
 - official chart image override and gRPC enablement;
 - PostgreSQL config mapping from an externally supplied CNPG application Secret and `<cluster>-rw` Service;
 - cert-manager server/client certificates and cert-manager-shaped Secrets;
