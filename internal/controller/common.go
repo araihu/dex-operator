@@ -80,7 +80,7 @@ func RemoveFinalizer(ctx context.Context, kube client.Client, object client.Obje
 	}
 	base := object.DeepCopyObject().(client.Object)
 	controllerutil.RemoveFinalizer(object, Finalizer)
-	return kube.Patch(ctx, object, client.MergeFrom(base))
+	return client.IgnoreNotFound(kube.Patch(ctx, object, client.MergeFrom(base)))
 }
 
 // PreclaimOwnership persists the external identity before the first create or adoption mutation.
