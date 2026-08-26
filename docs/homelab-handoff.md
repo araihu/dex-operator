@@ -18,7 +18,7 @@ When integration is separately authorized, map Dex PostgreSQL configuration to:
 
 Do not teach the operator these values and do not grant it access to the application Secret. Select the actual cluster and Secret only during the homelab change review.
 
-GitOps may configure any syntactically valid Dex image reference; the operator has no registry or repository allowlist. GitOps remains responsible for rejecting malformed references and pinning the selected manifest by digest. The verified `linux/amd64` default candidate for the current compatibility tuple is `ghcr.io/araihu/dex:v0.0.1@sha256:d9ff9b6c2eccd1b59f2c082e61b07fbdc9df4279ad69cf5db19d2b2d51918d23`.
+GitOps may select a Dex build from any registry or repository; the operator has no registry or repository allowlist. GitOps must configure a syntactically valid, digest-pinned OCI reference and verify signed image provenance against the reviewed source commit. The verified `linux/amd64` default candidate for the current compatibility tuple is `ghcr.io/araihu/dex:v0.0.1@sha256:d9ff9b6c2eccd1b59f2c082e61b07fbdc9df4279ad69cf5db19d2b2d51918d23`.
 
 Regardless of image identity, Dex must report the exact server/API tuple described in [compatibility](compatibility.md), with `DEX_API_CONNECTORS_CRUD=true`, `DEX_API_SESSIONS_IDENTITIES_CRUD=true`, and `DEX_SESSIONS_ENABLED=true` when MFA is enabled.
 
@@ -37,7 +37,7 @@ Before step 5, remove matching connectors, clients, and local users from static 
 ## Integration review checklist
 
 - Replace every `.invalid` address and fake Secret name in the generic manifests.
-- Select syntactically valid, immutable operator and Dex image references pinned by digest.
+- Select syntactically valid, immutable operator and Dex image references pinned by digest, and verify the Dex image's signed provenance against the reviewed source commit.
 - Narrow egress/ingress with the policy in [security](security.md).
 - Review cluster-wide Secret RBAC and who may create each CRD.
 - Confirm Git, Kubernetes/etcd, and CNPG backup/restore coverage.

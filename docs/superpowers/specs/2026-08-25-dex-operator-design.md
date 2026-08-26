@@ -277,7 +277,7 @@ DEX_API_SESSIONS_IDENTITIES_CRUD=true
 
 Moving to another Dex commit requires one reviewed change that updates the API dependency, expected server/API versions, compatibility tests, and documented behavior changes. Changing only registry or repository identity does not require an operator change when the runtime tuple remains compatible.
 
-The operator does not receive or inspect the Dex image reference, source SHA, or API-module provenance. Reference syntax validation, digest pinning, image publication, and rollout belong to Helm/GitOps integration. When an integration claims the reviewed build, it must verify signed image provenance against the recorded digest and source SHA. Operator tests build the reviewed source locally without publishing it.
+The operator does not receive or inspect the Dex image reference, source SHA, or API-module provenance. Reference syntax validation, digest pinning, signed provenance verification against the recorded source SHA, image publication, and rollout belong to Helm/GitOps integration and are mandatory for every supported deployment. Operator tests build the reviewed source locally without publishing it.
 
 ## Security boundaries
 
