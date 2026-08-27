@@ -66,6 +66,22 @@ func TestHarnessCompatibility(t *testing.T) {
 	if outcome := dexclient.NewCompatibilityGate(client, config.SupportedServerVersion).Check(context.Background()); outcome.State != dexclient.Compatible {
 		t.Fatalf("compatibility = %#v", outcome)
 	}
+	if outcome := dexclient.NewCompatibilityGate(client, upstreamServerVersion).Check(context.Background()); outcome.State != dexclient.Incompatible || outcome.Reason != "ServerVersionMismatch" {
+		t.Fatalf("old operator gate against AraiHu Dex = %#v, want ServerVersionMismatch", outcome)
+	}
+
+	t.Run("new operator rejects pinned upstream image", func(t *testing.T) {
+		upstream := startUpstreamDexHarness(t, memoryStorage)
+		upstreamClient, err := dexclient.NewClient(upstream.clientConfig("dex.test"), upstream.clientTLS)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = upstreamClient.Close() })
+		outcome := dexclient.NewCompatibilityGate(upstreamClient, config.SupportedServerVersion).Check(context.Background())
+		if outcome.State != dexclient.Incompatible || outcome.Reason != "ServerVersionMismatch" {
+			t.Fatalf("new operator gate against upstream Dex = %#v, want ServerVersionMismatch", outcome)
+		}
+	})
 
 	response, err := (&http.Client{Timeout: 5 * time.Second}).Get(harness.httpURL + "/dex/.well-known/openid-configuration")
 	if err != nil {
@@ -156,7 +172,12 @@ const memoryStorage dexStorage = "memory"
 
 const sqliteStorage dexStorage = "sqlite"
 
-const webAuthnBrowserImage = "chromedp/headless-shell@sha256:2d349b544a1ea6b5b5fd7c0fe99215ff662339c57407ee2e8c0a11af93516b04"
+const (
+	araiHuDexImage        = "ghcr.io/araihu/dex@sha256:e56eefe5a0aa1f2f9b614465f1cbd4ad84ffde34618400ea1d6ce16dc670debc"
+	upstreamDexImage      = "ghcr.io/dexidp/dex@sha256:af9469509350ff3f6ca70127175a58e5ab085b9d18740fa4a590d9f03f0a026b"
+	webAuthnBrowserImage  = "chromedp/headless-shell@sha256:2d349b544a1ea6b5b5fd7c0fe99215ff662339c57407ee2e8c0a11af93516b04"
+	upstreamServerVersion = "v2.46.0-20260806171424-ab64ed77"
+)
 
 func TestLoopbackPortBindings(t *testing.T) {
 	hostConfig := &dockercontainer.HostConfig{}
@@ -252,11 +273,23 @@ func startDexHarness(t *testing.T, storage dexStorage) *dexHarness {
 	return startDexHarnessWithFeatures(t, storage, true, true)
 }
 
+func startUpstreamDexHarness(t *testing.T, storage dexStorage) *dexHarness {
+	return startDexHarnessConfiguredImage(t, storage, true, true, false, nil, upstreamDexImage)
+}
+
+func startDexProfileClaimsHarness(t *testing.T) *dexHarness {
+	return startDexHarnessConfiguredImage(t, sqliteStorage, true, true, true, nil, araiHuDexImage)
+}
+
 func startDexHarnessWithFeatures(t *testing.T, storage dexStorage, connectorsCRUD, identitiesCRUD bool) *dexHarness {
 	return startDexHarnessConfigured(t, storage, connectorsCRUD, identitiesCRUD, nil)
 }
 
 func startDexHarnessConfigured(t *testing.T, storage dexStorage, connectorsCRUD, identitiesCRUD bool, mfaChain []string) *dexHarness {
+	return startDexHarnessConfiguredImage(t, storage, connectorsCRUD, identitiesCRUD, len(mfaChain) > 0, mfaChain, araiHuDexImage)
+}
+
+func startDexHarnessConfiguredImage(t *testing.T, storage dexStorage, connectorsCRUD, identitiesCRUD, sessionsEnabled bool, mfaChain []string, image string) *dexHarness {
 	t.Helper()
 	ensureDockerHost(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -276,7 +309,7 @@ func startDexHarnessConfigured(t *testing.T, storage dexStorage, connectorsCRUD,
 		testcontainers.WithEnv(map[string]string{
 			"DEX_API_CONNECTORS_CRUD":          strconv.FormatBool(connectorsCRUD),
 			"DEX_API_SESSIONS_IDENTITIES_CRUD": strconv.FormatBool(identitiesCRUD),
-			"DEX_SESSIONS_ENABLED":             strconv.FormatBool(len(mfaChain) > 0),
+			"DEX_SESSIONS_ENABLED":             strconv.FormatBool(sessionsEnabled),
 		}),
 		testcontainers.WithExposedPorts("5556/tcp", "5557/tcp"),
 		testcontainers.WithHostConfigModifier(loopbackPortBindings(t, "5556/tcp", "5557/tcp")),
@@ -298,7 +331,7 @@ func startDexHarnessConfigured(t *testing.T, storage dexStorage, connectorsCRUD,
 		)
 	}
 
-	container, err := testcontainers.Run(ctx, "dex-operator-test-dex:ab64ed778070", options...)
+	container, err := testcontainers.Run(ctx, image, options...)
 	cleanupOptions := []testcontainers.TerminateOption{}
 	if volumeName != "" {
 		cleanupOptions = append(cleanupOptions, testcontainers.RemoveVolumes(volumeName))

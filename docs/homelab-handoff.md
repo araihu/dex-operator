@@ -18,7 +18,7 @@ When integration is separately authorized, map Dex PostgreSQL configuration to:
 
 Do not teach the operator these values and do not grant it access to the application Secret. Select the actual cluster and Secret only during the homelab change review.
 
-GitOps may select a Dex build from any registry or repository; the operator has no registry or repository allowlist. GitOps must configure a syntactically valid, digest-pinned OCI reference and verify signed image provenance against the reviewed source commit. The verified `linux/amd64` default candidate for the current compatibility tuple is `ghcr.io/araihu/dex:v0.0.1@sha256:d9ff9b6c2eccd1b59f2c082e61b07fbdc9df4279ad69cf5db19d2b2d51918d23`.
+GitOps may select a Dex build from any registry or repository; the operator has no registry or repository allowlist. GitOps must configure a syntactically valid, digest-pinned OCI reference and verify signed image provenance against the reviewed source commit. The verified `linux/amd64` default candidate for the current compatibility tuple is `ghcr.io/araihu/dex:sha-92f1cd0f2beccb87613d211b7b19125d57039494@sha256:e56eefe5a0aa1f2f9b614465f1cbd4ad84ffde34618400ea1d6ce16dc670debc`.
 
 Regardless of image identity, Dex must report the exact server/API tuple described in [compatibility](compatibility.md), with `DEX_API_CONNECTORS_CRUD=true`, `DEX_API_SESSIONS_IDENTITIES_CRUD=true`, and `DEX_SESSIONS_ENABLED=true` when MFA is enabled.
 
@@ -34,7 +34,7 @@ The operator client certificate Secret must have cert-manager keys `ca.crt`, `tl
 
 For existing confidential clients, use `providedSecretRef` during initial adoption when the current secret must remain authoritative. Declare each client's existing logout destinations in `postLogoutRedirectURIs`. For operator-generated clients, select `clientIDKey` and `clientSecretKey` to match each consumer's existing Secret contract; omitted fields preserve the legacy `clientSecret`-only shape. Argo CD may additionally set `labels.app.kubernetes.io/part-of: argocd`. Moving a legacy generated Secret to configured keys or labels preserves the client secret; later key loss fails closed, while `rotationNonce` authorizes replacement.
 
-Current `DexLocalUser` resources cannot replace Zitadel-managed full name, preferred username, verified-email, groups, or disabled state. The pinned Dex gRPC password API does not expose those storage fields for mutation. Keep any consumer migration depending on those claims blocked until Dex and this operator receive the API extension documented in [compatibility](compatibility.md).
+`DexLocalUser` can now replace Zitadel-managed full name, preferred username, verified-email, and groups. During adoption, omit any profile field that must initially preserve the existing Dex value; declare it only when GitOps is ready to own it. After first declaration, an explicit zero or later omission clears that field. Disabled/blocking state remains unsupported and must stay outside the migration until Dex exposes a reviewed mutation contract. Refresh tokens created with sessions enabled retain login-time claims, so profile changes require reauthentication; see [compatibility](compatibility.md).
 
 Before step 5, remove matching connectors, clients, and local users from static Dex configuration and finish the Dex rollout. Never let static and dynamic ownership overlap. Use sync waves/health gates so a transient rollout cannot cause premature adoption or deletion.
 

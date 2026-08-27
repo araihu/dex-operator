@@ -17,7 +17,7 @@ import (
 	"github.com/araihu/dex-operator/internal/controller"
 	"github.com/araihu/dex-operator/internal/credentials"
 	dexclient "github.com/araihu/dex-operator/internal/dex"
-	dexapi "github.com/dexidp/dex/api/v2"
+	dexapi "github.com/araihu/dex/api/v2"
 	"golang.org/x/crypto/bcrypt"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -320,7 +320,17 @@ func TestDexLocalUser(t *testing.T) {
 	t.Run("adoption requires matching resolved user ID", func(t *testing.T) {
 		const observedID = "existing-subject"
 		hash := mustBcryptHash(t, "adopted-password")
-		if alreadyExists, err := harness.dexClient.CreatePassword(ctx, &dexapi.Password{Email: "adopted@example.com", Username: "Existing", UserId: observedID, Hash: hash}); err != nil || alreadyExists {
+		emailVerified := false
+		if alreadyExists, err := harness.dexClient.CreatePassword(ctx, &dexapi.Password{
+			Email:             "adopted@example.com",
+			Username:          "Existing",
+			UserId:            observedID,
+			Hash:              hash,
+			Name:              "Existing Name",
+			PreferredUsername: "existing",
+			EmailVerified:     &emailVerified,
+			Groups:            []string{"existing-group"},
+		}); err != nil || alreadyExists {
 			t.Fatalf("create existing password: alreadyExists=%t err=%v", alreadyExists, err)
 		}
 		secret := mustCreateOpaqueSecret(t, ctx, harness.client, "adopted-user-hash", map[string][]byte{"bcryptHash": hash})
@@ -344,9 +354,85 @@ func TestDexLocalUser(t *testing.T) {
 		mustUpdate(t, ctx, harness.client, conflicted)
 		adopted := awaitReadyLocalUserAfter(t, ctx, harness.client, resource.Name, previousGeneration)
 		assertRemotePassword(t, ctx, harness, resource.Spec.Email, resource.Spec.Username, observedID)
+		assertRemotePasswordProfile(t, ctx, harness, resource.Spec.Email, "Existing Name", "existing", false, []string{"existing-group"})
+		if len(adopted.Status.ManagedProfileFields) != 0 {
+			t.Fatalf("profile-omitting adoption claimed fields %#v", adopted.Status.ManagedProfileFields)
+		}
 		mustDelete(t, ctx, harness.client, adopted)
 		awaitLocalUserDeletion(t, ctx, harness.client, resource.Name)
 		awaitRemotePasswordAbsence(t, ctx, harness, resource.Spec.Email)
+	})
+
+	t.Run("profile create update drift removal and replay", func(t *testing.T) {
+		resource := newGeneratedLocalUser("profile-user", "profile@example.com", "profile-subject", "profile-user-secret")
+		name := "Ada Lovelace"
+		preferredUsername := "ada"
+		emailVerified := true
+		resource.Spec.Name = &name
+		resource.Spec.PreferredUsername = &preferredUsername
+		resource.Spec.EmailVerified = &emailVerified
+		resource.Spec.Groups = &[]string{"operators", "developers"}
+		mustCreate(t, ctx, harness.client, resource)
+		managed := awaitReadyLocalUser(t, ctx, harness.client, resource.Name)
+		if !slices.Equal(managed.Status.ManagedProfileFields, []dexv1alpha1.DexLocalUserProfileField{
+			dexv1alpha1.DexLocalUserProfileFieldName,
+			dexv1alpha1.DexLocalUserProfileFieldPreferredUsername,
+			dexv1alpha1.DexLocalUserProfileFieldEmailVerified,
+			dexv1alpha1.DexLocalUserProfileFieldGroups,
+		}) {
+			t.Fatalf("managed profile fields = %#v", managed.Status.ManagedProfileFields)
+		}
+		assertRemotePasswordProfile(t, ctx, harness, resource.Spec.Email, name, preferredUsername, true, []string{"developers", "operators"})
+
+		updatedName := "Augusta Ada King"
+		updatedPreferredUsername := "lovelace"
+		updatedVerified := false
+		previousGeneration := managed.Generation
+		managed.Spec.Name = &updatedName
+		managed.Spec.PreferredUsername = &updatedPreferredUsername
+		managed.Spec.EmailVerified = &updatedVerified
+		managed.Spec.Groups = &[]string{"reviewers"}
+		mustUpdate(t, ctx, harness.client, managed)
+		managed = awaitReadyLocalUserAfter(t, ctx, harness.client, resource.Name, previousGeneration)
+		assertRemotePasswordProfile(t, ctx, harness, resource.Spec.Email, updatedName, updatedPreferredUsername, false, []string{"reviewers"})
+
+		driftedName := "Drifted"
+		driftedPreferredUsername := "drifted"
+		driftedVerified := true
+		if notFound, err := harness.dexClient.UpdatePassword(ctx, &dexapi.UpdatePasswordReq{
+			Email:                resource.Spec.Email,
+			NewName:              &driftedName,
+			NewPreferredUsername: &driftedPreferredUsername,
+			NewEmailVerified:     &driftedVerified,
+			NewGroups:            &dexapi.PasswordGroups{Groups: []string{"drifted"}},
+		}); err != nil || notFound {
+			t.Fatalf("inject profile drift: notFound=%t err=%v", notFound, err)
+		}
+		awaitRemotePassword(t, ctx, harness, resource.Spec.Email, func(observed *dexapi.Password) bool {
+			return passwordProfileMatches(observed, updatedName, updatedPreferredUsername, false, []string{"reviewers"})
+		})
+
+		managed = getLocalUser(t, ctx, harness.client, resource.Name)
+		previousGeneration = managed.Generation
+		managed.Spec.Name = nil
+		managed.Spec.PreferredUsername = nil
+		managed.Spec.EmailVerified = nil
+		managed.Spec.Groups = nil
+		mustUpdate(t, ctx, harness.client, managed)
+		managed = awaitReadyLocalUserAfter(t, ctx, harness.client, resource.Name, previousGeneration)
+		assertRemotePasswordProfile(t, ctx, harness, resource.Spec.Email, "", "", false, []string{})
+
+		driftedName = "Restart Drift"
+		if notFound, err := harness.dexClient.UpdatePassword(ctx, &dexapi.UpdatePasswordReq{Email: resource.Spec.Email, NewName: &driftedName}); err != nil || notFound {
+			t.Fatalf("inject removed-field drift: notFound=%t err=%v", notFound, err)
+		}
+		dexHarness.restart(t)
+		awaitRemotePassword(t, ctx, harness, resource.Spec.Email, func(observed *dexapi.Password) bool {
+			return passwordProfileMatches(observed, "", "", false, []string{})
+		})
+
+		mustDelete(t, ctx, harness.client, managed)
+		awaitLocalUserDeletion(t, ctx, harness.client, resource.Name)
 	})
 
 	t.Run("Retain detaches generated Secret", func(t *testing.T) {
@@ -1542,6 +1628,24 @@ func assertRemotePassword(t *testing.T, ctx context.Context, harness *kubernetes
 	if len(observed.GetHash()) != 0 {
 		t.Fatal("ListPasswords unexpectedly exposed a hash")
 	}
+}
+
+func assertRemotePasswordProfile(t *testing.T, ctx context.Context, harness *kubernetesHarness, email, name, preferredUsername string, emailVerified bool, groups []string) {
+	t.Helper()
+	observed := remotePassword(t, ctx, harness, email)
+	if observed == nil {
+		t.Fatalf("remote password %q is absent", email)
+	}
+	if !passwordProfileMatches(observed, name, preferredUsername, emailVerified, groups) {
+		t.Fatalf("remote password profile = name %q preferredUsername %q emailVerified %v groups %#v", observed.GetName(), observed.GetPreferredUsername(), observed.EmailVerified, observed.GetGroups())
+	}
+}
+
+func passwordProfileMatches(observed *dexapi.Password, name, preferredUsername string, emailVerified bool, groups []string) bool {
+	return observed.GetName() == name &&
+		observed.GetPreferredUsername() == preferredUsername &&
+		observed.EmailVerified != nil && observed.GetEmailVerified() == emailVerified &&
+		equalStrings(observed.GetGroups(), groups)
 }
 
 func awaitRemotePassword(t *testing.T, ctx context.Context, harness *kubernetesHarness, email string, check func(*dexapi.Password) bool) {

@@ -5,10 +5,10 @@ go 1.26.0
 toolchain go1.26.7
 
 require (
+	github.com/araihu/dex/api/v2 v2.0.0-20260827142126-92f1cd0f2bec
 	github.com/caarlos0/env/v11 v11.4.1
 	github.com/chromedp/cdproto v0.0.0-20260714215040-dc233986426f
 	github.com/chromedp/chromedp v0.16.0
-	github.com/dexidp/dex/api/v2 v2.4.1-0.20260806151424-ab64ed778070
 	github.com/makiuchi-d/gozxing v0.1.1
 	github.com/moby/moby/api v1.55.0
 	github.com/testcontainers/testcontainers-go v0.44.0

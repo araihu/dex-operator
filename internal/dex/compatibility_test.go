@@ -5,13 +5,13 @@ import (
 	"strings"
 	"testing"
 
-	dexapi "github.com/dexidp/dex/api/v2"
+	dexapi "github.com/araihu/dex/api/v2"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
 func TestCompatibilityClassification(t *testing.T) {
-	exact := &dexapi.VersionResp{Server: "v2.46.0-20260806171424-ab64ed77", Api: 4}
+	exact := &dexapi.VersionResp{Server: "v2.46.0-20260806171424-ab64ed77+araihu.password-profile.v1", Api: 4}
 
 	tests := []struct {
 		name         string
@@ -41,6 +41,27 @@ func TestCompatibilityClassification(t *testing.T) {
 			}
 			if strings.Contains(got.Reason, "secret-") {
 				t.Fatalf("reason exposed upstream detail: %q", got.Reason)
+			}
+		})
+	}
+}
+
+func TestCompatibilityRejectsCrossedDexBuilds(t *testing.T) {
+	const upstream = "v2.46.0-20260806171424-ab64ed77"
+	const araiHu = upstream + "+araihu.password-profile.v1"
+
+	for _, test := range []struct {
+		name     string
+		expected string
+		actual   string
+	}{
+		{name: "old operator rejects AraiHu Dex", expected: upstream, actual: araiHu},
+		{name: "new operator rejects upstream Dex", expected: araiHu, actual: upstream},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := classifyCompatibility(test.expected, &dexapi.VersionResp{Server: test.actual, Api: 4}, nil, nil, nil)
+			if got.State != Incompatible || got.Reason != "ServerVersionMismatch" {
+				t.Fatalf("classifyCompatibility() = %#v, want ServerVersionMismatch", got)
 			}
 		})
 	}

@@ -3,7 +3,7 @@
 Recovery spans three independent planes:
 
 1. **Git**: Dex Helm/GitOps configuration, operator CR desired state, encrypted/provisioned Secret definitions, certificates, ordering, and NetworkPolicies.
-2. **Kubernetes/etcd**: CR status/ownership preclaims, finalizers, generated password/client Secrets, and cert-manager Secrets.
+2. **Kubernetes/etcd**: CR status/ownership preclaims (including managed local-user profile fields), finalizers, generated password/client Secrets, and cert-manager Secrets.
 3. **CNPG**: Dex's PostgreSQL records, sessions, OAuth state, local password hashes, connector/client state, and MFA material.
 
 CNPG backups do not contain generated password plaintext held only in Kubernetes Secrets. Kubernetes backups do not replace the Dex database. Git alone normally has neither plane's runtime secret material.
@@ -19,7 +19,7 @@ CNPG backups do not contain generated password plaintext held only in Kubernetes
 
 ## Lost state
 
-- **CR status lost, Dex record remains:** ownership is no longer proven. Reconciliation fails with `Conflict`; inspect the external record and set `adoptExisting: true` explicitly. For local users, the requested/resolved user ID must match to preserve `sub`.
+- **CR status lost, Dex record remains:** ownership is no longer proven. Reconciliation fails with `Conflict`; inspect the external record and set `adoptExisting: true` explicitly. For local users, the requested/resolved user ID must match to preserve `sub`; omitted profile fields are preserved and must be redeclared deliberately to reclaim ownership.
 - **Generated password Secret lost:** Dex retains only the bcrypt hash; plaintext is unrecoverable. The operator does not extract it from Dex or the database. Set a new rotation nonce to generate and apply a replacement.
 - **Generated OAuth2 client Secret lost:** after ownership is proven, the operator recovers Dex's current client secret into a new owned Secret using the configured data keys. If Dex no longer has the client secret, set a new rotation nonce; replacement requires delete/recreate and causes a brief client-authentication interruption.
 - **Provided Secret lost:** restore it from its external/GitOps secret source. The operator never becomes the backup source.

@@ -60,6 +60,19 @@ spec:
                 x-kubernetes-validations:
                 - message: email is immutable
                   rule: self == oldSelf
+              emailVerified:
+                description: EmailVerified is the optional OIDC email_verified claim
+                  source. Once present, the field remains managed; removing it clears
+                  to false.
+                type: boolean
+              groups:
+                description: Groups are the optional OIDC groups claim source. Once
+                  present, the field remains managed; removing it clears the remote
+                  list.
+                items:
+                  type: string
+                type: array
+                x-kubernetes-list-type: set
               mfa:
                 description: MFA configures inventory reset and removal operations.
                 properties:
@@ -83,6 +96,10 @@ spec:
                       when changed.
                     type: string
                 type: object
+              name:
+                description: Name is the optional OIDC name claim source. Once present,
+                  the field remains managed; removing it clears the remote value.
+                type: string
               password:
                 description: Password selects provided or generated credential material.
                 properties:
@@ -142,6 +159,11 @@ spec:
                 x-kubernetes-validations:
                 - message: exactly one of hashSecretRef or generated is required
                   rule: has(self.hashSecretRef) != has(self.generated)
+              preferredUsername:
+                description: PreferredUsername is the optional OIDC preferred_username
+                  claim source. Once present, the field remains managed; removing
+                  it clears the remote value.
+                type: string
               userID:
                 description: UserID is the immutable OIDC subject. The operator derives
                   it when omitted.
@@ -242,6 +264,20 @@ spec:
                 description: HandledRotationNonce is the last successfully applied
                   generated-credential nonce.
                 type: string
+              managedProfileFields:
+                description: ManagedProfileFields records sticky ownership after a
+                  profile field first appears in spec.
+                items:
+                  description: DexLocalUserProfileField identifies a profile field
+                    whose ownership has been claimed.
+                  enum:
+                  - Name
+                  - PreferredUsername
+                  - EmailVerified
+                  - Groups
+                  type: string
+                type: array
+                x-kubernetes-list-type: set
               mfaDevices:
                 description: MFADevices contains only non-secret device metadata.
                 items:

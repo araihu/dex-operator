@@ -28,7 +28,7 @@ import (
 	dexv1alpha1 "github.com/araihu/dex-operator/api/v1alpha1"
 	"github.com/araihu/dex-operator/internal/credentials"
 	dexclient "github.com/araihu/dex-operator/internal/dex"
-	dexapi "github.com/dexidp/dex/api/v2"
+	dexapi "github.com/araihu/dex/api/v2"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/araihu/dex-operator/internal/config"
-	dexapi "github.com/dexidp/dex/api/v2"
+	dexapi "github.com/araihu/dex/api/v2"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"

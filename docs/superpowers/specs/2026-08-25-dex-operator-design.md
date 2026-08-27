@@ -120,6 +120,7 @@ Spec:
 - `email`: required and immutable; Dex password-record natural key.
 - `username`: required and mutable.
 - `userID`: optional and immutable when specified. Dex accepts an opaque non-empty string; UUID form is recommended.
+- optional `name`, `preferredUsername`, `emailVerified`, and set-like `groups` profile fields. Each field becomes sticky-managed after first declaration; old/adopted omissions preserve remote values, while explicit zeros or later removal clear them.
 - `password`: exactly one of:
   - `hashSecretRef {name, key}` for a provided bcrypt hash;
   - `generated {secretName, length, characterSets, rotationNonce}`.
@@ -146,7 +147,7 @@ Generated-password policy:
 - changing policy alone does not rotate credentials;
 - a new `rotationNonce` creates and applies a replacement.
 
-Status includes the resolved user ID, observed generation, handled nonces, applied Secret resource version, conditions, and MFA device metadata. Device status may contain authenticator ID, type, confirmation state, creation time, WebAuthn credential ID, display name, transport, and security flags returned by Dex. It never contains a TOTP seed, MFA secret, WebAuthn public key, password, or bcrypt hash.
+Status includes the resolved user ID, names of sticky-managed profile fields, observed generation, handled nonces, applied Secret resource version, conditions, and MFA device metadata. Device status may contain authenticator ID, type, confirmation state, creation time, WebAuthn credential ID, display name, transport, and security flags returned by Dex. It never contains profile values, a TOTP seed, MFA secret, WebAuthn public key, password, or bcrypt hash.
 
 ### `DexOAuth2Client`
 
@@ -187,11 +188,11 @@ For each CR, the reconciler:
 2. Loads referenced Secret data and validates the desired object.
 3. Verifies the global Dex compatibility gate.
 4. Observes the external record by natural key.
-5. Creates a missing record or evaluates adoption for a pre-existing record.
-6. Normalizes and compares desired and actual state.
-7. Applies the minimum supported gRPC mutation needed to converge.
-8. Updates status only after observing the final external state.
-9. Requeues after `DEX_RECONCILE_INTERVAL`.
+5. Evaluates adoption for a pre-existing record.
+6. Persists external identity and sticky profile-field ownership preclaims before the first corresponding remote mutation.
+7. Normalizes and compares desired and actual state.
+8. Creates a missing record or applies the minimum supported gRPC mutation needed to converge.
+9. Observes the final external state, then updates convergence status and requeues after `DEX_RECONCILE_INTERVAL`.
 
 CR and indexed Secret events enqueue immediate reconciliation. Unrelated Secret changes do not enqueue all resources.
 
@@ -260,10 +261,10 @@ If Dex is unavailable, deletion remains blocked and status reports a sanitized f
 
 ## Compatibility strategy
 
-The initial reviewed build contract is exact:
+The reviewed build contract is exact:
 
-- Dex source SHA `ab64ed778070e983cbb10cfc07ea4bb397d14312`;
-- matching `github.com/dexidp/dex/api/v2` pseudo-version;
+- AraiHu Dex overlay SHA `92f1cd0f2beccb87613d211b7b19125d57039494` over Dex source SHA `ab64ed778070e983cbb10cfc07ea4bb397d14312`;
+- `github.com/araihu/dex/api/v2 v2.0.0-20260827142126-92f1cd0f2bec`;
 - image identity remains Helm/GitOps-owned and may use any syntactically valid, digest-pinned OCI reference.
 
 The runtime compatibility gate is limited to values Dex exposes over gRPC: numeric API version `4`, the exact commit-derived `GetVersion.server` value configured in the operator, and successful read-only `ListConnectors` and `ListUserIdentities` capability probes. A version, API, or capability mismatch fails readiness, sets `Compatible=False` on reconciled resources, and blocks mutations. Probe results are discarded and never logged. The operator does not assume that a newer API is compatible.
@@ -277,7 +278,7 @@ DEX_API_SESSIONS_IDENTITIES_CRUD=true
 
 Moving to another Dex commit requires one reviewed change that updates the API dependency, expected server/API versions, compatibility tests, and documented behavior changes. Changing only registry or repository identity does not require an operator change when the runtime tuple remains compatible.
 
-The operator does not receive or inspect the Dex image reference, source SHA, or API-module provenance. Reference syntax validation, digest pinning, signed provenance verification against the recorded source SHA, image publication, and rollout belong to Helm/GitOps integration and are mandatory for every supported deployment. Operator tests build the reviewed source locally without publishing it.
+The operator does not receive or inspect the Dex image reference, source SHA, or API-module provenance. Reference syntax validation, digest pinning, signed provenance verification against the recorded source SHA, image publication, and rollout belong to Helm/GitOps integration and are mandatory for every supported deployment. Operator tests pull the reviewed AraiHu and official upstream images by digest and prove crossed version rejection.
 
 ## Security boundaries
 
@@ -303,7 +304,7 @@ Fast tests cover local deterministic behavior only:
 - config validation and generated environment documentation;
 - secret-safe error/status formatting.
 
-Docker integration tests use `testcontainers-go` to start the exact locally built Dex image. Dex uses memory storage for disposable cases and SQLite on a test volume for restart/persistence cases. PostgreSQL is intentionally absent because the operator never uses its interface.
+Docker integration tests use `testcontainers-go` to start the exact digest-pinned AraiHu Dex image and a digest-pinned official upstream image for crossed compatibility rejection. Dex uses memory storage for disposable cases and SQLite on a test volume for restart/persistence cases. PostgreSQL is intentionally absent because the operator never uses its interface.
 
 `envtest` supplies a real Kubernetes API server while reconcilers communicate with the real Dex container. The suite covers:
 

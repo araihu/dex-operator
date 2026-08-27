@@ -106,6 +106,26 @@ func TestCRDContract(t *testing.T) {
 		if credentialIDs.Items.Schema.Pattern != "^[A-Za-z0-9_-]+$" {
 			t.Fatalf("WebAuthn credential ID pattern = %q", credentialIDs.Items.Schema.Pattern)
 		}
+		for _, name := range []string{"name", "preferredUsername", "emailVerified", "groups"} {
+			if slices.Contains(spec.Required, name) {
+				t.Errorf("profile field %s is required", name)
+			}
+			_ = property(t, spec, name)
+		}
+		groups := property(t, spec, "groups")
+		if groups.XListType == nil || *groups.XListType != "set" {
+			t.Fatalf("groups list type = %v, want set", groups.XListType)
+		}
+		status := property(t, crd.Spec.Versions[0].Schema.OpenAPIV3Schema, "status")
+		managed := property(t, status, "managedProfileFields")
+		if managed.XListType == nil || *managed.XListType != "set" || managed.Items == nil || managed.Items.Schema == nil {
+			t.Fatalf("managedProfileFields schema = %#v", managed)
+		}
+		for _, want := range []string{"Name", "PreferredUsername", "EmailVerified", "Groups"} {
+			if !enumContains(managed.Items.Schema.Enum, want) {
+				t.Errorf("managedProfileFields enum lacks %q", want)
+			}
+		}
 	})
 
 	t.Run("DexOAuth2Client secret modes", func(t *testing.T) {

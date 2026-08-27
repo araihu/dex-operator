@@ -13,7 +13,7 @@ import (
 )
 
 // SupportedServerVersion is the only Dex server version this binary accepts.
-const SupportedServerVersion = "v2.46.0-20260806171424-ab64ed77"
+const SupportedServerVersion = "v2.46.0-20260806171424-ab64ed77+araihu.password-profile.v1"
 
 // Config contains the complete dex-operator runtime environment.
 //

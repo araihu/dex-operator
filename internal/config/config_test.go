@@ -8,6 +8,13 @@ import (
 	"time"
 )
 
+func TestSupportedServerVersion(t *testing.T) {
+	const want = "v2.46.0-20260806171424-ab64ed77+araihu.password-profile.v1"
+	if SupportedServerVersion != want {
+		t.Fatalf("SupportedServerVersion = %q, want %q", SupportedServerVersion, want)
+	}
+}
+
 func TestParse(t *testing.T) {
 	validTLS := map[string]string{
 		"DEX_GRPC_ADDRESS":            "dex.example.test:5557",

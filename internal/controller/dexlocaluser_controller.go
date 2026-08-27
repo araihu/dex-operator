@@ -19,12 +19,13 @@ package controller
 import (
 	"context"
 	"errors"
+	"slices"
 	"time"
 
 	dexv1alpha1 "github.com/araihu/dex-operator/api/v1alpha1"
 	"github.com/araihu/dex-operator/internal/credentials"
 	dexclient "github.com/araihu/dex-operator/internal/dex"
-	dexapi "github.com/dexidp/dex/api/v2"
+	dexapi "github.com/araihu/dex/api/v2"
 	"golang.org/x/crypto/bcrypt"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -107,6 +108,15 @@ func (r *DexLocalUserReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			return ctrl.Result{}, err
 		}
 	}
+	managedProfileFields := nextManagedProfileFields(resource)
+	if !slices.Equal(resource.Status.ManagedProfileFields, managedProfileFields) {
+		if err := r.patchStatus(ctx, resource, func(status *dexv1alpha1.DexLocalUserStatus) error {
+			status.ManagedProfileFields = managedProfileFields
+			return nil
+		}); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 
 	credentialSource := credentialSourceProvided
 	if resource.Spec.Password.Generated != nil {
@@ -136,6 +146,7 @@ func (r *DexLocalUserReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	desired := &dexapi.Password{Email: resource.Spec.Email, Username: resource.Spec.Username, UserId: resolvedUserID, Hash: hash}
+	applyManagedProfileToPassword(resource, desired)
 	if observed == nil {
 		alreadyExists, createErr := r.Dex.CreatePassword(ctx, desired)
 		if createErr != nil {
@@ -168,6 +179,9 @@ func (r *DexLocalUserReconciler) Reconcile(ctx context.Context, req ctrl.Request
 				changed = true
 			}
 		}
+		if applyManagedProfileUpdate(resource, observed, request) {
+			changed = true
+		}
 		if changed {
 			notFound, updateErr := r.Dex.UpdatePassword(ctx, request)
 			if updateErr != nil {
@@ -183,7 +197,8 @@ func (r *DexLocalUserReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if err != nil {
 		return r.statusResult(ctx, resource, ReasonDexUnavailable, "Dex password state could not be confirmed.", metav1.ConditionFalse, false, err)
 	}
-	if observed == nil || observed.GetUserId() != resolvedUserID || observed.GetUsername() != resource.Spec.Username {
+	profileRequest := &dexapi.UpdatePasswordReq{}
+	if observed == nil || observed.GetUserId() != resolvedUserID || observed.GetUsername() != resource.Spec.Username || applyManagedProfileUpdate(resource, observed, profileRequest) {
 		return r.statusResult(ctx, resource, ReasonDriftCorrectionFailed, "Dex password identity did not converge.", metav1.ConditionTrue, true, nil)
 	}
 	if resource.Spec.Password.Generated != nil {

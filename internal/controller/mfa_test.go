@@ -8,7 +8,7 @@ import (
 	"time"
 
 	dexv1alpha1 "github.com/araihu/dex-operator/api/v1alpha1"
-	dexapi "github.com/dexidp/dex/api/v2"
+	dexapi "github.com/araihu/dex/api/v2"
 )
 
 func TestMFAMapEmptyInventory(t *testing.T) {

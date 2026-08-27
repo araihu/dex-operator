@@ -56,7 +56,7 @@ func TestManagerContract(t *testing.T) {
 		t.Fatalf("manager TLS volume = %#v", pod.Volumes)
 	}
 	wantEnvironment := map[string]string{
-		"DEX_EXPECTED_SERVER_VERSION": "v2.46.0-20260806171424-ab64ed77",
+		"DEX_EXPECTED_SERVER_VERSION": "v2.46.0-20260806171424-ab64ed77+araihu.password-profile.v1",
 		"DEX_GRPC_ADDRESS":            "dex.example.invalid:5557",
 		"DEX_GRPC_INSECURE":           "false",
 		"DEX_GRPC_SERVER_NAME":        "dex.example.invalid",

@@ -401,7 +401,7 @@ func dexLoginHTTPClient(t *testing.T, harness *dexHarness) *http.Client {
 		Jar:       jar,
 		Timeout:   10 * time.Second,
 		CheckRedirect: func(request *http.Request, via []*http.Request) error {
-			if request.URL.Hostname() == "client.test" {
+			if request.URL.Hostname() == "client.test" || request.URL.Hostname() == "127.0.0.1" {
 				return http.ErrUseLastResponse
 			}
 			return nil

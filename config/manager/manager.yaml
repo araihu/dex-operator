@@ -75,7 +75,7 @@ spec:
         - name: DEX_RECONCILE_INTERVAL
           value: 5m
         - name: DEX_EXPECTED_SERVER_VERSION
-          value: v2.46.0-20260806171424-ab64ed77
+          value: v2.46.0-20260806171424-ab64ed77+araihu.password-profile.v1
         ports:
         - containerPort: 8081
           name: health

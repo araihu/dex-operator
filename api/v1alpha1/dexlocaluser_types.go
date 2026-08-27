@@ -79,6 +79,21 @@ type DexLocalUserMFASpec struct {
 	RemoveWebAuthnCredentialIDs []string `json:"removeWebAuthnCredentialIDs,omitempty"`
 }
 
+// DexLocalUserProfileField identifies a profile field whose ownership has been claimed.
+// +kubebuilder:validation:Enum=Name;PreferredUsername;EmailVerified;Groups
+type DexLocalUserProfileField string
+
+const (
+	// DexLocalUserProfileFieldName identifies the OIDC name claim source.
+	DexLocalUserProfileFieldName DexLocalUserProfileField = "Name"
+	// DexLocalUserProfileFieldPreferredUsername identifies the OIDC preferred_username claim source.
+	DexLocalUserProfileFieldPreferredUsername DexLocalUserProfileField = "PreferredUsername"
+	// DexLocalUserProfileFieldEmailVerified identifies the OIDC email_verified claim source.
+	DexLocalUserProfileFieldEmailVerified DexLocalUserProfileField = "EmailVerified"
+	// DexLocalUserProfileFieldGroups identifies the OIDC groups claim source.
+	DexLocalUserProfileFieldGroups DexLocalUserProfileField = "Groups"
+)
+
 // DexLocalUserSpec defines the desired state of a Dex local user.
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.userID) || (has(self.userID) && self.userID == oldSelf.userID)",message="userID is immutable once specified"
 type DexLocalUserSpec struct {
@@ -93,6 +108,19 @@ type DexLocalUserSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	// +optional
 	UserID string `json:"userID,omitempty"`
+	// Name is the optional OIDC name claim source. Once present, the field remains managed; removing it clears the remote value.
+	// +optional
+	Name *string `json:"name,omitempty"`
+	// PreferredUsername is the optional OIDC preferred_username claim source. Once present, the field remains managed; removing it clears the remote value.
+	// +optional
+	PreferredUsername *string `json:"preferredUsername,omitempty"`
+	// EmailVerified is the optional OIDC email_verified claim source. Once present, the field remains managed; removing it clears to false.
+	// +optional
+	EmailVerified *bool `json:"emailVerified,omitempty"`
+	// Groups are the optional OIDC groups claim source. Once present, the field remains managed; removing it clears the remote list.
+	// +listType=set
+	// +optional
+	Groups *[]string `json:"groups,omitempty"`
 	// Password selects provided or generated credential material.
 	Password DexLocalUserPasswordSpec `json:"password"`
 	// MFA configures inventory reset and removal operations.
@@ -150,6 +178,10 @@ type DexLocalUserStatus struct {
 	// ResolvedUserID is both the derived/explicit ID and the external ownership preclaim.
 	// +optional
 	ResolvedUserID string `json:"resolvedUserID,omitempty"`
+	// ManagedProfileFields records sticky ownership after a profile field first appears in spec.
+	// +listType=set
+	// +optional
+	ManagedProfileFields []DexLocalUserProfileField `json:"managedProfileFields,omitempty"`
 	// HandledRotationNonce is the last successfully applied generated-credential nonce.
 	// +optional
 	HandledRotationNonce string `json:"handledRotationNonce,omitempty"`

@@ -4,14 +4,15 @@ The operator intentionally supports one reviewed Dex build contract and one exac
 
 | Component | Supported value |
 |---|---|
-| Dex source commit | `ab64ed778070e983cbb10cfc07ea4bb397d14312` |
-| Dex server version | `v2.46.0-20260806171424-ab64ed77` |
-| Go API module | `github.com/dexidp/dex/api/v2 v2.4.1-0.20260806151424-ab64ed778070` |
+| AraiHu Dex overlay commit | `92f1cd0f2beccb87613d211b7b19125d57039494` |
+| Upstream Dex source commit | `ab64ed778070e983cbb10cfc07ea4bb397d14312` |
+| Dex server version | `v2.46.0-20260806171424-ab64ed77+araihu.password-profile.v1` |
+| Go API module | `github.com/araihu/dex/api/v2 v2.0.0-20260827142126-92f1cd0f2bec` |
 | Numeric gRPC API | `4` |
 
 The operator does not receive or inspect the Dex image reference and imposes no registry or repository allowlist. Helm/GitOps may configure a build from any registry or repository, but must configure a syntactically valid, digest-pinned OCI image reference and verify signed image provenance against the reviewed source commit above.
 
-The verified `linux/amd64` handoff image for the supported contract is `ghcr.io/araihu/dex:v0.0.1@sha256:d9ff9b6c2eccd1b59f2c082e61b07fbdc9df4279ad69cf5db19d2b2d51918d23`. Image identity does not replace runtime compatibility checks: the connected server must report the exact server and numeric API versions above and expose the required capabilities. The source commit and Go API module are review/build provenance inputs that gRPC cannot prove, so provenance verification is a mandatory GitOps boundary. This project also creates the local-only test image `dex-operator-test-dex:ab64ed778070`.
+The verified `linux/amd64` handoff image for the supported contract is `ghcr.io/araihu/dex:sha-92f1cd0f2beccb87613d211b7b19125d57039494@sha256:e56eefe5a0aa1f2f9b614465f1cbd4ad84ffde34618400ea1d6ce16dc670debc`. Image identity does not replace runtime compatibility checks: the connected server must report the exact server and numeric API versions above and expose the required capabilities. The source commits and Go API module are review/build provenance inputs that gRPC cannot prove, so provenance verification is a mandatory GitOps boundary. Integration also fixes the official upstream image `ghcr.io/dexidp/dex@sha256:af9469509350ff3f6ca70127175a58e5ab085b9d18740fa4a590d9f03f0a026b` and requires `ServerVersionMismatch` in both crossed directions: old gate/new Dex and new gate/upstream Dex.
 
 Dex must enable:
 
@@ -39,6 +40,8 @@ Do not widen compatibility to a version range without repeating the API and beha
 
 ## Local-user attribute boundary
 
-The pinned Dex storage model supports `name`, `preferredUsername`, `emailVerified`, and `groups` for local passwords, but its gRPC `api/v2.Password` exposes only `email`, `hash`, `username`, and `user_id`. `UpdatePassword` can change only the hash and username. The identity API reports `email_verified`, `groups`, and `blocked_until`, but has no create/update identity RPC; `blocked_until` is not a declarative account-disable field.
+The AraiHu API additively exposes `name`, `preferred_username`, optional `email_verified`, and `groups` on password create/list/update. `DexLocalUser` claims each field independently only after it appears in spec. Omitted fields on old or newly adopted CRs remain unmanaged and preserve remote data. Once claimed, an explicit zero or later field removal clears the remote value and ownership remains in `status.managedProfileFields`, so restart and later drift still converge.
 
-Therefore `DexLocalUser` cannot safely manage full name, preferred username, verified-email state, groups, blocking, or disabling with the supported API tuple. Adding them requires a reviewed Dex change that extends the v2 protobuf, create/list/update password server mappings, storage-backed behavior, generated API module, compatibility tuple, and real login/refresh tests. The operator will not simulate these fields or write Dex storage directly.
+Dex emits these values on local-password login. With `DEX_SESSIONS_ENABLED=true`, refresh tokens preserve the identity cached at login; profile changes require a new login to reach new tokens. With sessions disabled, the pinned Dex refresh implementation invokes the local connector from inside its refresh-token storage update while that connector rereads the password record, so live post-login profile reload is not part of this supported contract. The integration suite proves login claims and session-backed refresh claims without simulating storage behavior.
+
+Blocking and disabling remain unsupported. The identity API's `blocked_until` observation is not a declarative account-disable mutation, so the operator does not expose it, invent arbitrary claims, or write Dex storage directly.

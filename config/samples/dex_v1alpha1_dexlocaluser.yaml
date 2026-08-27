@@ -8,6 +8,11 @@ metadata:
 spec:
   email: user@example.invalid
   username: Example User
+  name: Example User
+  preferredUsername: example
+  emailVerified: true
+  groups:
+  - home-lab-users
   password:
     generated:
       secretName: example-user-password
