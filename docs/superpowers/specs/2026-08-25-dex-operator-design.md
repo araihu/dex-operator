@@ -155,17 +155,17 @@ Spec:
 - `id`: required and immutable.
 - `public`: required and immutable.
 - `name`: required, non-empty, and mutable.
-- mutable `logoURL`, `redirectURIs`, `trustedPeers`, and `allowedConnectors`.
+- mutable `logoURL`, `redirectURIs`, `postLogoutRedirectURIs`, `trustedPeers`, and `allowedConnectors`.
 - confidential clients require exactly one secret mode:
   - provided same-namespace Secret reference;
-- generated Secret with a requested name, optional client-ID key, and configurable client-secret key.
+- generated Secret with a requested name, optional client-ID key, configurable client-secret key, and optional declarative labels.
 - generated client secrets contain 64 characters from `A-Z`, `a-z`, `0-9`, `_`, and `-`, selected with `crypto/rand`.
 - `rotationNonce` explicitly authorizes secret rotation.
 - public clients reject all secret fields.
 
-Dex cannot update client secrets, switch public/confidential mode, or clear a previously set logo URL. Secret drift, an authorized rotation, or logo removal is reconciled through delete/recreate, producing a brief client-authentication interruption. Other mutable non-secret fields use `UpdateClient`.
+Dex cannot update client secrets, switch public/confidential mode, clear a previously set logo URL, or represent removal of all post-logout redirects through `UpdateClient`. Secret drift, an authorized rotation, logo removal, or post-logout redirect removal is reconciled through delete/recreate, producing a brief client-authentication interruption. Other mutable non-secret fields use `UpdateClient`.
 
-The generated Secret contains `clientSecret` by default. `clientIDKey` optionally adds the non-secret client ID, and `clientSecretKey` changes the secret data key for direct consumer compatibility. No client secret appears in status.
+The generated Secret contains `clientSecret` by default. `clientIDKey` optionally adds the non-secret client ID, and `clientSecretKey` changes the secret data key for direct consumer compatibility. `labels` declaratively owns only the named Secret label keys; labels outside that set are preserved. Arbitrary annotations, owner references, finalizers, and data templates are not exposed. No client secret appears in status.
 
 ### `DexConnector`
 
@@ -198,7 +198,7 @@ CR and indexed Secret events enqueue immediate reconciliation. Unrelated Secret 
 Idempotency rules:
 
 - Dex `already_exists` and `not_found` responses are interpreted according to current observed state rather than treated as fatal by default.
-- Set-like URI, peer, connector, and grant-type lists compare in normalized order.
+- Set-like redirect URI, post-logout redirect URI, peer, connector, and grant-type lists compare in normalized order.
 - Connector JSON compares semantically in memory.
 - No remote write occurs when normalized state already matches.
 - Each RPC has a bounded deadline; controller-runtime rate limiting handles retries.

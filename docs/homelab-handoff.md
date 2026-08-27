@@ -32,7 +32,7 @@ The operator client certificate Secret must have cert-manager keys `ca.crt`, `tl
 4. Operator CRDs, RBAC, TLS Secret, and Deployment; wait for readiness.
 5. Dynamic `DexConnector`, `DexOAuth2Client`, and `DexLocalUser` resources.
 
-For existing confidential clients, use `providedSecretRef` during initial adoption when the current secret must remain authoritative. For operator-generated clients, select `clientIDKey` and `clientSecretKey` to match each consumer's existing Secret contract; omitted fields preserve the legacy `clientSecret`-only shape. Moving a legacy generated Secret to configured keys preserves the client secret; later key loss fails closed, while `rotationNonce` authorizes replacement.
+For existing confidential clients, use `providedSecretRef` during initial adoption when the current secret must remain authoritative. Declare each client's existing logout destinations in `postLogoutRedirectURIs`. For operator-generated clients, select `clientIDKey` and `clientSecretKey` to match each consumer's existing Secret contract; omitted fields preserve the legacy `clientSecret`-only shape. Argo CD may additionally set `labels.app.kubernetes.io/part-of: argocd`. Moving a legacy generated Secret to configured keys or labels preserves the client secret; later key loss fails closed, while `rotationNonce` authorizes replacement.
 
 Current `DexLocalUser` resources cannot replace Zitadel-managed full name, preferred username, verified-email, groups, or disabled state. The pinned Dex gRPC password API does not expose those storage fields for mutation. Keep any consumer migration depending on those claims blocked until Dex and this operator receive the API extension documented in [compatibility](compatibility.md).
 

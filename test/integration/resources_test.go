@@ -390,6 +390,7 @@ func TestDexOAuth2Client(t *testing.T) {
 		managed.Spec.Name = "Public Updated"
 		managed.Spec.LogoURL = "https://araihu.com/logo.svg"
 		managed.Spec.RedirectURIs = []string{"https://app.araihu.com/callback", "http://127.0.0.1/callback"}
+		managed.Spec.PostLogoutRedirectURIs = []string{"https://app.araihu.com/logout", "http://127.0.0.1/signed-out"}
 		managed.Spec.TrustedPeers = []string{"peer-b", "peer-a"}
 		managed.Spec.AllowedConnectors = []string{"github", "local"}
 		mustUpdate(t, ctx, harness.client, managed)
@@ -398,19 +399,21 @@ func TestDexOAuth2Client(t *testing.T) {
 
 		previousGeneration = managed.Generation
 		managed.Spec.LogoURL = ""
+		managed.Spec.PostLogoutRedirectURIs = nil
 		mustUpdate(t, ctx, harness.client, managed)
 		managed = awaitReadyOAuth2ClientAfter(t, ctx, harness.client, resource.Name, previousGeneration)
 		observed := remoteOAuth2Client(t, ctx, harness, resource.Spec.ID)
-		if observed == nil || observed.GetLogoUrl() != "" {
-			t.Fatal("logo removal did not converge")
+		if observed == nil || observed.GetLogoUrl() != "" || len(observed.GetPostLogoutRedirectUris()) != 0 {
+			t.Fatal("logo or post-logout redirect removal did not converge")
 		}
 
 		if notFound, err := harness.dexClient.UpdateOAuth2Client(ctx, &dexapi.UpdateClientReq{
-			Id:                resource.Spec.ID,
-			Name:              "Drifted",
-			RedirectUris:      []string{"https://drifted.example/callback"},
-			TrustedPeers:      []string{},
-			AllowedConnectors: []string{},
+			Id:                     resource.Spec.ID,
+			Name:                   "Drifted",
+			RedirectUris:           []string{"https://drifted.example/callback"},
+			PostLogoutRedirectUris: []string{"https://drifted.example/logout"},
+			TrustedPeers:           []string{},
+			AllowedConnectors:      []string{},
 		}); err != nil || notFound {
 			t.Fatalf("inject OAuth2 client drift: notFound=%t err=%v", notFound, err)
 		}
@@ -506,12 +509,13 @@ func TestDexOAuth2Client(t *testing.T) {
 		assertRemoteOAuth2Client(t, ctx, harness, desiredOAuth2Client(managed, generatedValue))
 
 		generated.Data["consumer-note"] = []byte("preserve")
+		generated.Labels = map[string]string{"consumer.example/keep": "true"}
 		mustUpdate(t, ctx, harness.client, generated)
 		var settled *corev1.Secret
 		eventually(t, func() (bool, error) {
 			currentSecret := getSecret(t, ctx, harness.client, resource.Spec.Secret.Generated.SecretName)
 			currentResource := getOAuth2Client(t, ctx, harness.client, resource.Name)
-			if currentResource.Status.AppliedSecretResourceVersion != currentSecret.ResourceVersion || string(currentSecret.Data["consumer-note"]) != "preserve" {
+			if currentResource.Status.AppliedSecretResourceVersion != currentSecret.ResourceVersion || string(currentSecret.Data["consumer-note"]) != "preserve" || currentSecret.Labels["consumer.example/keep"] != "true" {
 				return false, nil
 			}
 			settled = currentSecret
@@ -519,6 +523,40 @@ func TestDexOAuth2Client(t *testing.T) {
 		})
 		if string(settled.Data["consumer-note"]) != "preserve" {
 			t.Fatal("generated Secret reconciliation deleted unrelated consumer data")
+		}
+
+		managed = getOAuth2Client(t, ctx, harness.client, resource.Name)
+		previousGeneration := managed.Generation
+		managed.Spec.Secret.Generated.Labels = map[string]string{
+			"app.kubernetes.io/part-of": "argocd",
+			"dex.araihu.com/purpose":    "oidc",
+		}
+		mustUpdate(t, ctx, harness.client, managed)
+		managed = awaitReadyOAuth2ClientAfter(t, ctx, harness.client, resource.Name, previousGeneration)
+		labeled := awaitSecret(t, ctx, harness.client, resource.Spec.Secret.Generated.SecretName)
+		if labeled.UID != generated.UID || string(labeled.Data["clientSecret"]) != generatedValue {
+			t.Fatal("adding generated Secret labels replaced the Secret or rotated the credential")
+		}
+		for key, want := range map[string]string{
+			"app.kubernetes.io/part-of": "argocd",
+			"dex.araihu.com/purpose":    "oidc",
+			"consumer.example/keep":     "true",
+		} {
+			if got := labeled.Labels[key]; got != want {
+				t.Fatalf("generated Secret label %q = %q, want %q", key, got, want)
+			}
+		}
+
+		previousGeneration = managed.Generation
+		delete(managed.Spec.Secret.Generated.Labels, "dex.araihu.com/purpose")
+		mustUpdate(t, ctx, harness.client, managed)
+		managed = awaitReadyOAuth2ClientAfter(t, ctx, harness.client, resource.Name, previousGeneration)
+		settled = awaitSecret(t, ctx, harness.client, resource.Spec.Secret.Generated.SecretName)
+		if _, exists := settled.Labels["dex.araihu.com/purpose"]; exists {
+			t.Fatal("removed declarative label remains on generated Secret")
+		}
+		if settled.Labels["app.kubernetes.io/part-of"] != "argocd" || settled.Labels["consumer.example/keep"] != "true" {
+			t.Fatalf("generated Secret labels after removal = %#v", settled.Labels)
 		}
 
 		if notFound, err := harness.dexClient.DeleteOAuth2Client(ctx, resource.Spec.ID); err != nil || notFound {
@@ -533,13 +571,16 @@ func TestDexOAuth2Client(t *testing.T) {
 		}
 
 		managed = getOAuth2Client(t, ctx, harness.client, resource.Name)
-		previousGeneration := managed.Generation
+		previousGeneration = managed.Generation
 		managed.Spec.Secret.RotationNonce = "generated-rotation-1"
 		mustUpdate(t, ctx, harness.client, managed)
 		managed = awaitReadyOAuth2ClientAfter(t, ctx, harness.client, resource.Name, previousGeneration)
 		rotated := awaitSecretValueChange(t, ctx, harness.client, resource.Spec.Secret.Generated.SecretName, "manual-edit")
 		if len(rotated) != 64 || rotated == generatedValue {
 			t.Fatal("generated rotation did not produce fresh 64-character material")
+		}
+		if labels := awaitSecret(t, ctx, harness.client, resource.Spec.Secret.Generated.SecretName).Labels; labels["app.kubernetes.io/part-of"] != "argocd" || labels["consumer.example/keep"] != "true" {
+			t.Fatalf("generated Secret labels after rotation = %#v", labels)
 		}
 		assertRemoteOAuth2Client(t, ctx, harness, desiredOAuth2Client(managed, rotated))
 
@@ -549,6 +590,9 @@ func TestDexOAuth2Client(t *testing.T) {
 		recovered := awaitSecretUIDChange(t, ctx, harness.client, resource.Spec.Secret.Generated.SecretName, oldUID)
 		if string(recovered.Data["clientSecret"]) != rotated {
 			t.Fatal("lost generated Secret was not recovered from owned Dex state")
+		}
+		if got := recovered.Labels["app.kubernetes.io/part-of"]; got != "argocd" {
+			t.Fatalf("recovered generated Secret part-of label = %q, want argocd", got)
 		}
 		if owner := metav1.GetControllerOf(recovered); owner == nil || owner.UID != managed.UID {
 			t.Fatalf("recovered Secret controller owner = %#v", owner)
@@ -1113,10 +1157,11 @@ func newPublicOAuth2Client(name string) *dexv1alpha1.DexOAuth2Client {
 	return &dexv1alpha1.DexOAuth2Client{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
 		Spec: dexv1alpha1.DexOAuth2ClientSpec{
-			ID:           name,
-			Public:       true,
-			Name:         "Public Client",
-			RedirectURIs: []string{"https://app.araihu.com/callback"},
+			ID:                     name,
+			Public:                 true,
+			Name:                   "Public Client",
+			RedirectURIs:           []string{"https://app.araihu.com/callback"},
+			PostLogoutRedirectURIs: []string{"https://app.araihu.com/logout"},
 		},
 	}
 }
@@ -1134,14 +1179,15 @@ func newConfidentialOAuth2Client(name string) *dexv1alpha1.DexOAuth2Client {
 
 func desiredOAuth2Client(resource *dexv1alpha1.DexOAuth2Client, secret string) *dexapi.Client {
 	return &dexapi.Client{
-		Id:                resource.Spec.ID,
-		Secret:            secret,
-		Public:            resource.Spec.Public,
-		Name:              resource.Spec.Name,
-		LogoUrl:           resource.Spec.LogoURL,
-		RedirectUris:      dexclient.NormalizeSet(resource.Spec.RedirectURIs),
-		TrustedPeers:      dexclient.NormalizeSet(resource.Spec.TrustedPeers),
-		AllowedConnectors: dexclient.NormalizeSet(resource.Spec.AllowedConnectors),
+		Id:                     resource.Spec.ID,
+		Secret:                 secret,
+		Public:                 resource.Spec.Public,
+		Name:                   resource.Spec.Name,
+		LogoUrl:                resource.Spec.LogoURL,
+		RedirectUris:           dexclient.NormalizeSet(resource.Spec.RedirectURIs),
+		PostLogoutRedirectUris: dexclient.NormalizeSet(resource.Spec.PostLogoutRedirectURIs),
+		TrustedPeers:           dexclient.NormalizeSet(resource.Spec.TrustedPeers),
+		AllowedConnectors:      dexclient.NormalizeSet(resource.Spec.AllowedConnectors),
 	}
 }
 
@@ -1239,8 +1285,8 @@ func assertRemoteOAuth2Client(t *testing.T, ctx context.Context, harness *kubern
 		t.Fatalf("remote OAuth2 client %q is absent", desired.GetId())
 	}
 	if !oauth2ClientEqual(desired, observed) {
-		t.Fatalf("remote OAuth2 client mismatch: public=%t name=%q logo=%q redirects=%v peers=%v connectors=%v secretMatches=%t",
-			observed.GetPublic(), observed.GetName(), observed.GetLogoUrl(), observed.GetRedirectUris(), observed.GetTrustedPeers(), observed.GetAllowedConnectors(), observed.GetSecret() == desired.GetSecret())
+		t.Fatalf("remote OAuth2 client mismatch: public=%t name=%q logo=%q redirects=%v postLogoutRedirects=%v peers=%v connectors=%v secretMatches=%t",
+			observed.GetPublic(), observed.GetName(), observed.GetLogoUrl(), observed.GetRedirectUris(), observed.GetPostLogoutRedirectUris(), observed.GetTrustedPeers(), observed.GetAllowedConnectors(), observed.GetSecret() == desired.GetSecret())
 	}
 }
 
@@ -1251,6 +1297,7 @@ func oauth2ClientEqual(desired, observed *dexapi.Client) bool {
 		desired.GetName() == observed.GetName() &&
 		desired.GetLogoUrl() == observed.GetLogoUrl() &&
 		equalStrings(desired.GetRedirectUris(), observed.GetRedirectUris()) &&
+		equalStrings(desired.GetPostLogoutRedirectUris(), observed.GetPostLogoutRedirectUris()) &&
 		equalStrings(desired.GetTrustedPeers(), observed.GetTrustedPeers()) &&
 		equalStrings(desired.GetAllowedConnectors(), observed.GetAllowedConnectors())
 }

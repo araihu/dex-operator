@@ -11,6 +11,8 @@ spec:
   name: Example Client
   redirectURIs:
   - https://app.example.invalid/callback
+  postLogoutRedirectURIs:
+  - https://app.example.invalid/signed-out
   secret:
     providedSecretRef:
       name: example-client-secret
@@ -29,8 +31,12 @@ spec:
   name: Generated Example Client
   redirectURIs:
   - https://generated-app.example.invalid/callback
+  postLogoutRedirectURIs:
+  - https://generated-app.example.invalid/signed-out
   secret:
     generated:
       secretName: generated-example-client-oidc
-      clientIDKey: OIDC_CLIENT_ID
-      clientSecretKey: OIDC_CLIENT_SECRET
+      clientIDKey: clientID
+      clientSecretKey: clientSecret
+      labels:
+        app.kubernetes.io/part-of: argocd

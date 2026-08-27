@@ -22,6 +22,8 @@ Dex also needs `DEX_SESSIONS_ENABLED=true` when its Helm-owned configuration ena
 
 `DEX_EXPECTED_SERVER_VERSION` must equal the server value above. The readiness gate calls `GetVersion`, `ListConnectors`, and `ListUserIdentities`; any mismatch, disabled capability, or unavailable call blocks reconciliation mutations.
 
+This API tuple exposes `post_logout_redirect_uris` on client create/get/list/update. Non-empty changes use `UpdateClient`. A repeated protobuf field cannot preserve explicit presence for an empty list, while the pinned server updates this field only when it receives a non-nil slice. The operator therefore uses delete/recreate when removing all post-logout redirects; this preserves the configured client secret but briefly interrupts client authentication.
+
 ## Upgrade checklist
 
 1. Select a syntactically valid, digest-pinned OCI image reference, record its immutable digest and Dex source commit, and verify signed provenance connects them.

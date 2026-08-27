@@ -10,7 +10,7 @@ The MVP exposes `dex.araihu.com/v1alpha1` resources for:
 
 - local users with provided bcrypt hashes or one-time generated passwords;
 - TOTP/WebAuthn inventory, reset, and device removal for local users;
-- public or confidential OAuth2 clients, including generated consumer-ready Secrets and explicit secret rotation;
+- public or confidential OAuth2 clients, including post-logout redirects, generated consumer-ready Secrets, and explicit secret rotation;
 - connectors with opaque JSON configuration read from a same-namespace Secret.
 
 Passwords, client secrets, connector configuration, TLS keys, TOTP seeds, and WebAuthn keys never belong in CR status. See [security](docs/security.md), [compatibility](docs/compatibility.md), and [backup/recovery](docs/backup-recovery.md) before integration.
@@ -50,6 +50,8 @@ Generated OAuth2 client Secrets preserve the legacy `clientSecret`-only shape by
 | Generic environment import | `OIDC_CLIENT_ID` | `OIDC_CLIENT_SECRET` |
 
 Adding configured keys to a legacy `clientSecret` Secret rewrites the owned Secret without rotating the Dex client secret. Later removal or corruption of the configured secret key fails closed. Changing `rotationNonce` generates a new secret and recreates the Dex client. `providedSecretRef` remains the migration path when an existing client secret must be retained.
+
+`postLogoutRedirectURIs` declares the browser destinations accepted after RP-initiated logout. Generated Secrets also accept a `labels` string map. The operator updates and removes only labels declared through that field, preserves unrelated labels, and does not expose arbitrary annotations, owner references, finalizers, or data templating.
 
 Runtime environment variables and defaults are generated in [configuration](docs/configuration.md). The future, approval-gated homelab wiring is documented in [homelab handoff](docs/homelab-handoff.md).
 

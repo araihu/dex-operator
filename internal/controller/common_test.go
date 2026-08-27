@@ -192,7 +192,7 @@ func TestSecretGeneratedOwnerConflictAndRetainDetach(t *testing.T) {
 	otherOwner.UID = types.UID("owner-two")
 	kube := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	created, err := CreateGeneratedSecret(ctx, kube, scheme, owner, "app-secret", map[string][]byte{"clientSecret": []byte("value")}, map[string]string{"test.araihu.com/client-secret-key": "clientSecret"})
+	created, err := CreateGeneratedSecret(ctx, kube, scheme, owner, "app-secret", map[string][]byte{"clientSecret": []byte("value")}, nil, map[string]string{"test.araihu.com/client-secret-key": "clientSecret"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +202,7 @@ func TestSecretGeneratedOwnerConflictAndRetainDetach(t *testing.T) {
 	if created.Annotations["test.araihu.com/client-secret-key"] != "clientSecret" {
 		t.Fatalf("annotations = %#v", created.Annotations)
 	}
-	if _, err := CreateGeneratedSecret(ctx, kube, scheme, otherOwner, "app-secret", map[string][]byte{"clientSecret": []byte("other")}, nil); err == nil {
+	if _, err := CreateGeneratedSecret(ctx, kube, scheme, otherOwner, "app-secret", map[string][]byte{"clientSecret": []byte("other")}, nil, nil); err == nil {
 		t.Fatal("CreateGeneratedSecret() accepted conflicting owner")
 	}
 	if err := DetachGeneratedSecret(ctx, kube, scheme, owner, "app-secret"); err != nil {
@@ -232,11 +232,11 @@ func TestGeneratedOAuth2ClientSecretMigrationKeepsConfiguredClientIDKey(t *testi
 		},
 	}
 	kube := fake.NewClientBuilder().WithScheme(scheme).Build()
-	if _, err := CreateGeneratedSecret(ctx, kube, scheme, resource, "app-secret", map[string][]byte{"clientSecret": []byte("secret-value")}, nil); err != nil {
+	if _, err := CreateGeneratedSecret(ctx, kube, scheme, resource, "app-secret", map[string][]byte{"clientSecret": []byte("secret-value")}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	reconciler := &DexOAuth2ClientReconciler{Client: kube, Scheme: scheme}
-	if _, _, err := reconciler.generatedSecret(ctx, resource, &dexapi.Client{Id: "app", Secret: "secret-value"}, true, false); err != nil {
+	if _, _, err := reconciler.generatedSecret(ctx, resource, &dexapi.Client{Id: "app", Secret: "secret-value"}, true, false, true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -262,7 +262,7 @@ func TestGeneratedOAuth2ClientSecretMigrationWaitsForRemoteCreate(t *testing.T) 
 		}},
 	}
 	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&dexv1alpha1.DexOAuth2Client{}).WithObjects(resource).Build()
-	created, err := CreateGeneratedSecret(ctx, kube, scheme, resource, "app-secret", map[string][]byte{"clientSecret": []byte("secret-value")}, map[string]string{generatedOAuth2ClientSecretKeyAnnotation: "clientSecret"})
+	created, err := CreateGeneratedSecret(ctx, kube, scheme, resource, "app-secret", map[string][]byte{"clientSecret": []byte("secret-value")}, nil, map[string]string{generatedOAuth2ClientSecretKeyAnnotation: "clientSecret"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +271,7 @@ func TestGeneratedOAuth2ClientSecretMigrationWaitsForRemoteCreate(t *testing.T) 
 		t.Fatal(err)
 	}
 	reconciler := &DexOAuth2ClientReconciler{Client: kube, Scheme: scheme}
-	value, resourceVersion, err := reconciler.generatedSecret(ctx, resource, nil, false, false)
+	value, resourceVersion, err := reconciler.generatedSecret(ctx, resource, nil, false, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,14 +285,14 @@ func TestGeneratedOAuth2ClientSecretMigrationWaitsForRemoteCreate(t *testing.T) 
 	if _, exists := beforeCreate.Data["OIDC_CLIENT_SECRET"]; exists {
 		t.Fatal("generated Secret layout changed before remote create")
 	}
-	value, resourceVersion, err = reconciler.generatedSecret(ctx, resource, &dexapi.Client{Id: "app", Secret: "secret-value"}, true, false)
+	value, resourceVersion, err = reconciler.generatedSecret(ctx, resource, &dexapi.Client{Id: "app", Secret: "secret-value"}, true, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if value != "secret-value" || resourceVersion == created.ResourceVersion {
 		t.Fatalf("post-create migration = value %q resourceVersion %q", value, resourceVersion)
 	}
-	if retryValue, retryResourceVersion, err := reconciler.generatedSecret(ctx, resource, &dexapi.Client{Id: "app", Secret: "secret-value"}, true, false); err != nil {
+	if retryValue, retryResourceVersion, err := reconciler.generatedSecret(ctx, resource, &dexapi.Client{Id: "app", Secret: "secret-value"}, true, false, true); err != nil {
 		t.Fatalf("retry after layout patch: %v", err)
 	} else if retryValue != value || retryResourceVersion != resourceVersion {
 		t.Fatalf("retry = value %q resourceVersion %q", retryValue, retryResourceVersion)

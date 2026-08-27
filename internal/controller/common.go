@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 
 	dexv1alpha1 "github.com/araihu/dex-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -202,7 +203,7 @@ func connectorSecretNames(object client.Object) []string {
 }
 
 // CreateGeneratedSecret creates an owned Secret or returns the already-owned one unchanged.
-func CreateGeneratedSecret(ctx context.Context, kube client.Client, scheme *runtime.Scheme, owner client.Object, name string, data map[string][]byte, annotations map[string]string) (*corev1.Secret, error) {
+func CreateGeneratedSecret(ctx context.Context, kube client.Client, scheme *runtime.Scheme, owner client.Object, name string, data map[string][]byte, labels, annotations map[string]string) (*corev1.Secret, error) {
 	key := types.NamespacedName{Namespace: owner.GetNamespace(), Name: name}
 	existing := &corev1.Secret{}
 	if err := kube.Get(ctx, key, existing); err == nil {
@@ -215,7 +216,7 @@ func CreateGeneratedSecret(ctx context.Context, kube client.Client, scheme *runt
 	}
 
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: owner.GetNamespace(), Annotations: annotations},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: owner.GetNamespace(), Labels: maps.Clone(labels), Annotations: maps.Clone(annotations)},
 		Type:       corev1.SecretTypeOpaque,
 		Data:       data,
 	}

@@ -75,6 +75,13 @@ spec:
                 description: Name is the mutable display name.
                 minLength: 1
                 type: string
+              postLogoutRedirectURIs:
+                description: PostLogoutRedirectURIs are accepted browser destinations
+                  after RP-initiated logout.
+                items:
+                  type: string
+                type: array
+                x-kubernetes-list-type: set
               public:
                 description: Public selects a public OAuth2 client and is immutable.
                 type: boolean
@@ -111,6 +118,12 @@ spec:
                         minLength: 1
                         pattern: ^[-._a-zA-Z0-9]+$
                         type: string
+                      labels:
+                        additionalProperties:
+                          type: string
+                        description: Labels are declarative labels for the generated
+                          Secret. Other labels are preserved.
+                        type: object
                       secretName:
                         description: SecretName receives the generated client data.
                         minLength: 1

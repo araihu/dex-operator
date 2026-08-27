@@ -41,6 +41,9 @@ type GeneratedOAuth2ClientSecretSpec struct {
 	// +kubebuilder:validation:Pattern="^[-._a-zA-Z0-9]+$"
 	// +optional
 	ClientSecretKey string `json:"clientSecretKey,omitempty"`
+	// Labels are declarative labels for the generated Secret. Other labels are preserved.
+	// +optional
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 // DexOAuth2ClientSecretSpec selects provided or generated confidential material.
@@ -77,6 +80,10 @@ type DexOAuth2ClientSpec struct {
 	// +listType=set
 	// +optional
 	RedirectURIs []string `json:"redirectURIs,omitempty"`
+	// PostLogoutRedirectURIs are accepted browser destinations after RP-initiated logout.
+	// +listType=set
+	// +optional
+	PostLogoutRedirectURIs []string `json:"postLogoutRedirectURIs,omitempty"`
 	// TrustedPeers are clients trusted for cross-client assertions.
 	// +listType=set
 	// +optional

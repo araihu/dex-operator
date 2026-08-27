@@ -111,6 +111,10 @@ func TestCRDContract(t *testing.T) {
 	t.Run("DexOAuth2Client secret modes", func(t *testing.T) {
 		crd := loadCRD(t, "dex.araihu.com_dexoauth2clients.yaml")
 		spec := property(t, crd.Spec.Versions[0].Schema.OpenAPIV3Schema, "spec")
+		postLogoutRedirectURIs := property(t, spec, "postLogoutRedirectURIs")
+		if postLogoutRedirectURIs.XListType == nil || *postLogoutRedirectURIs.XListType != "set" {
+			t.Fatalf("postLogoutRedirectURIs list type = %v, want set", postLogoutRedirectURIs.XListType)
+		}
 		if !hasValidation(spec, "self.public") || !hasValidation(spec, "has(self.secret)") {
 			t.Fatal("public/confidential secret validation is absent")
 		}
@@ -134,6 +138,15 @@ func TestCRDContract(t *testing.T) {
 		}
 		if !hasValidation(generated, "self.clientIDKey != self.clientSecretKey") {
 			t.Fatal("generated Secret permits client ID and client secret to use the same key")
+		}
+		labels := property(t, generated, "labels")
+		if labels.Type != "object" || labels.AdditionalProperties == nil || labels.AdditionalProperties.Schema == nil || labels.AdditionalProperties.Schema.Type != "string" {
+			t.Fatalf("generated Secret labels schema = %#v, want string map", labels)
+		}
+		for _, forbidden := range []string{"annotations", "ownerReferences", "finalizers", "data"} {
+			if _, exists := generated.Properties[forbidden]; exists {
+				t.Errorf("generated Secret exposes forbidden metadata/data field %q", forbidden)
+			}
 		}
 	})
 }

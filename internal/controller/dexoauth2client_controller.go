@@ -19,6 +19,7 @@ package controller
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"maps"
 	"slices"
 	"time"
@@ -31,8 +32,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	metav1validation "k8s.io/apimachinery/pkg/apis/meta/v1/validation"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -42,9 +45,10 @@ import (
 )
 
 const (
-	generatedOAuth2RotationNonceAnnotation   = "dex.araihu.com/rotation-nonce"
-	generatedOAuth2ClientSecretKeyAnnotation = "dex.araihu.com/client-secret-key"
-	defaultGeneratedOAuth2ClientSecretKey    = "clientSecret"
+	generatedOAuth2RotationNonceAnnotation    = "dex.araihu.com/rotation-nonce"
+	generatedOAuth2ClientSecretKeyAnnotation  = "dex.araihu.com/client-secret-key"
+	generatedOAuth2ManagedLabelKeysAnnotation = "dex.araihu.com/managed-label-keys"
+	defaultGeneratedOAuth2ClientSecretKey     = "clientSecret"
 )
 
 // DexOAuth2ClientReconciler reconciles DexOAuth2Client resources through Dex's gRPC API.
@@ -101,9 +105,16 @@ func (r *DexOAuth2ClientReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	rotationRequested := resource.Spec.Secret != nil && resource.Spec.Secret.RotationNonce != resource.Status.HandledRotationNonce
 	secretValue, secretResourceVersion := providedSecret, providedResourceVersion
 	if resource.Spec.Secret != nil && resource.Spec.Secret.Generated != nil {
-		secretValue, secretResourceVersion, err = r.generatedSecret(ctx, resource, observed, found, rotationRequested)
+		secretValue, secretResourceVersion, err = r.generatedSecret(ctx, resource, observed, found, rotationRequested, false)
 		if err != nil {
 			return r.statusResult(ctx, resource, ReasonConflict, "Generated OAuth2 client Secret is not safely usable.", metav1.ConditionTrue, true, nil)
+		}
+		checkpointed, checkpointErr := r.checkpointGeneratedOAuth2ClientSecretRecovery(ctx, resource, observed, found, rotationRequested, secretValue, secretResourceVersion)
+		if checkpointErr != nil {
+			return ctrl.Result{}, checkpointErr
+		}
+		if checkpointed {
+			return ctrl.Result{Requeue: true}, nil
 		}
 	}
 	if !resource.Spec.Public && (secretValue == "" || !utf8.ValidString(secretValue)) {
@@ -117,7 +128,7 @@ func (r *DexOAuth2ClientReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return r.statusResult(ctx, resource, ReasonConflict, "OAuth2 client secret drift requires a new rotation nonce.", metav1.ConditionTrue, true, nil)
 	}
 
-	recreate := found && (observed.GetPublic() != desired.GetPublic() || observed.GetSecret() != desired.GetSecret() || observed.GetLogoUrl() != "" && desired.GetLogoUrl() == "")
+	recreate := found && oauth2ClientNeedsRecreate(desired, observed)
 	if !found || recreate {
 		if recreate {
 			if _, err := r.Dex.DeleteOAuth2Client(ctx, resource.Spec.ID); err != nil {
@@ -152,7 +163,7 @@ func (r *DexOAuth2ClientReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return r.statusResult(ctx, resource, ReasonDriftCorrectionFailed, "Dex OAuth2 client did not converge.", metav1.ConditionTrue, true, nil)
 	}
 	if resource.Spec.Secret != nil && resource.Spec.Secret.Generated != nil {
-		confirmedSecret, confirmedResourceVersion, confirmedErr := r.generatedSecret(ctx, resource, observed, true, rotationRequested)
+		confirmedSecret, confirmedResourceVersion, confirmedErr := r.generatedSecret(ctx, resource, observed, true, rotationRequested, true)
 		if confirmedErr != nil || confirmedSecret != observed.GetSecret() {
 			return r.statusResult(ctx, resource, ReasonConflict, "Generated OAuth2 client Secret layout could not be safely confirmed.", metav1.ConditionTrue, true, nil)
 		}
@@ -178,6 +189,13 @@ func (r *DexOAuth2ClientReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	return ctrl.Result{RequeueAfter: r.ReconcileInterval}, nil
 }
 
+func oauth2ClientNeedsRecreate(desired, observed *dexapi.Client) bool {
+	return observed.GetPublic() != desired.GetPublic() ||
+		observed.GetSecret() != desired.GetSecret() ||
+		observed.GetLogoUrl() != "" && desired.GetLogoUrl() == "" ||
+		len(observed.GetPostLogoutRedirectUris()) > 0 && len(desired.GetPostLogoutRedirectUris()) == 0
+}
+
 func (r *DexOAuth2ClientReconciler) loadProvidedSecret(ctx context.Context, resource *dexv1alpha1.DexOAuth2Client) (string, string, error) {
 	if resource.Spec.Public || resource.Spec.Secret == nil || resource.Spec.Secret.ProvidedSecretRef == nil {
 		return "", "", nil
@@ -192,8 +210,11 @@ func (r *DexOAuth2ClientReconciler) loadProvidedSecret(ctx context.Context, reso
 	return string(value), resourceVersion, nil
 }
 
-func (r *DexOAuth2ClientReconciler) generatedSecret(ctx context.Context, resource *dexv1alpha1.DexOAuth2Client, observed *dexapi.Client, found, rotationRequested bool) (string, string, error) {
+func (r *DexOAuth2ClientReconciler) generatedSecret(ctx context.Context, resource *dexv1alpha1.DexOAuth2Client, observed *dexapi.Client, found, rotationRequested, remoteConverged bool) (string, string, error) {
 	policy := resource.Spec.Secret.Generated
+	if errs := metav1validation.ValidateLabels(policy.Labels, field.NewPath("spec", "secret", "generated", "labels")); len(errs) > 0 {
+		return "", "", errs.ToAggregate()
+	}
 	name := policy.SecretName
 	secret := &corev1.Secret{}
 	key := types.NamespacedName{Namespace: resource.Namespace, Name: name}
@@ -217,6 +238,11 @@ func (r *DexOAuth2ClientReconciler) generatedSecret(ctx context.Context, resourc
 			}
 			base := secret.DeepCopy()
 			secret.Data = generatedOAuth2ClientSecretData(resource, secret.Data, value)
+			if remoteConverged {
+				if err := reconcileGeneratedOAuth2ClientSecretLabels(secret, policy.Labels); err != nil {
+					return "", "", err
+				}
+			}
 			if secret.Annotations == nil {
 				secret.Annotations = map[string]string{}
 			}
@@ -260,8 +286,14 @@ func (r *DexOAuth2ClientReconciler) generatedSecret(ctx context.Context, resourc
 		if !found {
 			return string(value), secret.ResourceVersion, nil
 		}
+		if !remoteConverged {
+			return string(value), secret.ResourceVersion, nil
+		}
 		base := secret.DeepCopy()
 		secret.Data = generatedOAuth2ClientSecretData(resource, secret.Data, string(value))
+		if err := reconcileGeneratedOAuth2ClientSecretLabels(secret, policy.Labels); err != nil {
+			return "", "", err
+		}
 		if layoutMigration && policy.ClientIDKey != appliedSecretKey {
 			delete(secret.Data, appliedSecretKey)
 		}
@@ -271,7 +303,7 @@ func (r *DexOAuth2ClientReconciler) generatedSecret(ctx context.Context, resourc
 			}
 			secret.Annotations[generatedOAuth2ClientSecretKeyAnnotation] = secretKey
 		}
-		if !maps.EqualFunc(base.Data, secret.Data, bytes.Equal) || !maps.Equal(base.Annotations, secret.Annotations) {
+		if !maps.EqualFunc(base.Data, secret.Data, bytes.Equal) || !maps.Equal(base.Labels, secret.Labels) || !maps.Equal(base.Annotations, secret.Annotations) {
 			if err := r.Patch(ctx, secret, client.MergeFrom(base)); err != nil {
 				return "", "", err
 			}
@@ -302,11 +334,62 @@ func (r *DexOAuth2ClientReconciler) generatedSecret(ctx context.Context, resourc
 	if rotationRequested {
 		annotations[generatedOAuth2RotationNonceAnnotation] = resource.Spec.Secret.RotationNonce
 	}
-	created, err := CreateGeneratedSecret(ctx, r.Client, r.Scheme, resource, name, generatedOAuth2ClientSecretData(resource, nil, value), annotations)
+	if len(policy.Labels) > 0 {
+		managedKeys, err := json.Marshal(slices.Sorted(maps.Keys(policy.Labels)))
+		if err != nil {
+			return "", "", err
+		}
+		annotations[generatedOAuth2ManagedLabelKeysAnnotation] = string(managedKeys)
+	}
+	created, err := CreateGeneratedSecret(ctx, r.Client, r.Scheme, resource, name, generatedOAuth2ClientSecretData(resource, nil, value), policy.Labels, annotations)
 	if err != nil {
 		return "", "", err
 	}
 	return value, created.ResourceVersion, nil
+}
+
+func (r *DexOAuth2ClientReconciler) checkpointGeneratedOAuth2ClientSecretRecovery(ctx context.Context, resource *dexv1alpha1.DexOAuth2Client, observed *dexapi.Client, found, rotationRequested bool, secretValue, secretResourceVersion string) (bool, error) {
+	if !found || rotationRequested || observed.GetSecret() != secretValue || resource.Status.AppliedSecretResourceVersion == "" || secretResourceVersion == resource.Status.AppliedSecretResourceVersion {
+		return false, nil
+	}
+	if err := r.patchStatus(ctx, resource, func(status *dexv1alpha1.DexOAuth2ClientStatus) error {
+		status.AppliedSecretResourceVersion = secretResourceVersion
+		return nil
+	}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func reconcileGeneratedOAuth2ClientSecretLabels(secret *corev1.Secret, desired map[string]string) error {
+	var managedKeys []string
+	if encoded := secret.Annotations[generatedOAuth2ManagedLabelKeysAnnotation]; encoded != "" {
+		if err := json.Unmarshal([]byte(encoded), &managedKeys); err != nil {
+			return apierrors.NewBadRequest("generated OAuth2 client Secret has invalid managed label metadata")
+		}
+	}
+	for _, key := range managedKeys {
+		if _, keep := desired[key]; !keep {
+			delete(secret.Labels, key)
+		}
+	}
+	if len(desired) == 0 {
+		delete(secret.Annotations, generatedOAuth2ManagedLabelKeysAnnotation)
+		return nil
+	}
+	if secret.Labels == nil {
+		secret.Labels = make(map[string]string, len(desired))
+	}
+	maps.Copy(secret.Labels, desired)
+	encoded, err := json.Marshal(slices.Sorted(maps.Keys(desired)))
+	if err != nil {
+		return err
+	}
+	if secret.Annotations == nil {
+		secret.Annotations = map[string]string{}
+	}
+	secret.Annotations[generatedOAuth2ManagedLabelKeysAnnotation] = string(encoded)
+	return nil
 }
 
 func generatedOAuth2ClientSecretData(resource *dexv1alpha1.DexOAuth2Client, data map[string][]byte, secret string) map[string][]byte {
@@ -327,14 +410,15 @@ func generatedOAuth2ClientSecretData(resource *dexv1alpha1.DexOAuth2Client, data
 
 func desiredDexOAuth2Client(resource *dexv1alpha1.DexOAuth2Client, secret string) *dexapi.Client {
 	return &dexapi.Client{
-		Id:                resource.Spec.ID,
-		Secret:            secret,
-		Public:            resource.Spec.Public,
-		Name:              resource.Spec.Name,
-		LogoUrl:           resource.Spec.LogoURL,
-		RedirectUris:      dexclient.NormalizeSet(resource.Spec.RedirectURIs),
-		TrustedPeers:      dexclient.NormalizeSet(resource.Spec.TrustedPeers),
-		AllowedConnectors: dexclient.NormalizeSet(resource.Spec.AllowedConnectors),
+		Id:                     resource.Spec.ID,
+		Secret:                 secret,
+		Public:                 resource.Spec.Public,
+		Name:                   resource.Spec.Name,
+		LogoUrl:                resource.Spec.LogoURL,
+		RedirectUris:           dexclient.NormalizeSet(resource.Spec.RedirectURIs),
+		PostLogoutRedirectUris: dexclient.NormalizeSet(resource.Spec.PostLogoutRedirectURIs),
+		TrustedPeers:           dexclient.NormalizeSet(resource.Spec.TrustedPeers),
+		AllowedConnectors:      dexclient.NormalizeSet(resource.Spec.AllowedConnectors),
 	}
 }
 
@@ -355,6 +439,7 @@ func oauth2ClientUpdate(desired, observed *dexapi.Client) (*dexapi.UpdateClientR
 		set      func([]string)
 	}{
 		{desired.GetRedirectUris(), observed.GetRedirectUris(), func(values []string) { request.RedirectUris = values }},
+		{desired.GetPostLogoutRedirectUris(), observed.GetPostLogoutRedirectUris(), func(values []string) { request.PostLogoutRedirectUris = values }},
 		{desired.GetTrustedPeers(), observed.GetTrustedPeers(), func(values []string) { request.TrustedPeers = values }},
 		{desired.GetAllowedConnectors(), observed.GetAllowedConnectors(), func(values []string) { request.AllowedConnectors = values }},
 	} {
@@ -374,6 +459,7 @@ func oauth2ClientManagedEqual(desired, observed *dexapi.Client) bool {
 		desired.GetName() == observed.GetName() &&
 		desired.GetLogoUrl() == observed.GetLogoUrl() &&
 		slices.Equal(dexclient.NormalizeSet(desired.GetRedirectUris()), dexclient.NormalizeSet(observed.GetRedirectUris())) &&
+		slices.Equal(dexclient.NormalizeSet(desired.GetPostLogoutRedirectUris()), dexclient.NormalizeSet(observed.GetPostLogoutRedirectUris())) &&
 		slices.Equal(dexclient.NormalizeSet(desired.GetTrustedPeers()), dexclient.NormalizeSet(observed.GetTrustedPeers())) &&
 		slices.Equal(dexclient.NormalizeSet(desired.GetAllowedConnectors()), dexclient.NormalizeSet(observed.GetAllowedConnectors()))
 }
