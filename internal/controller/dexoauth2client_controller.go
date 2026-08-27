@@ -17,7 +17,9 @@ limitations under the License.
 package controller
 
 import (
+	"bytes"
 	"context"
+	"maps"
 	"slices"
 	"time"
 	"unicode/utf8"
@@ -39,7 +41,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
-const generatedOAuth2RotationNonceAnnotation = "dex.araihu.com/rotation-nonce"
+const (
+	generatedOAuth2RotationNonceAnnotation   = "dex.araihu.com/rotation-nonce"
+	generatedOAuth2ClientSecretKeyAnnotation = "dex.araihu.com/client-secret-key"
+	defaultGeneratedOAuth2ClientSecretKey    = "clientSecret"
+)
 
 // DexOAuth2ClientReconciler reconciles DexOAuth2Client resources through Dex's gRPC API.
 type DexOAuth2ClientReconciler struct {
@@ -103,7 +109,9 @@ func (r *DexOAuth2ClientReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if !resource.Spec.Public && (secretValue == "" || !utf8.ValidString(secretValue)) {
 		return r.statusResult(ctx, resource, ReasonInvalidInput, "OAuth2 client secret must be non-empty UTF-8 data.", metav1.ConditionTrue, false, nil)
 	}
-
+	if !found && !rotationRequested && resource.Status.AppliedSecretResourceVersion != "" && resource.Spec.Secret.ProvidedSecretRef != nil && secretResourceVersion != resource.Status.AppliedSecretResourceVersion {
+		return r.statusResult(ctx, resource, ReasonConflict, "OAuth2 client credential continuity is not proven; a new rotation nonce is required.", metav1.ConditionTrue, true, nil)
+	}
 	desired := desiredDexOAuth2Client(resource, secretValue)
 	if found && observed.GetPublic() == desired.GetPublic() && !desired.GetPublic() && observed.GetSecret() != desired.GetSecret() && !rotationRequested {
 		return r.statusResult(ctx, resource, ReasonConflict, "OAuth2 client secret drift requires a new rotation nonce.", metav1.ConditionTrue, true, nil)
@@ -143,6 +151,13 @@ func (r *DexOAuth2ClientReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if !found || !oauth2ClientManagedEqual(desired, observed) {
 		return r.statusResult(ctx, resource, ReasonDriftCorrectionFailed, "Dex OAuth2 client did not converge.", metav1.ConditionTrue, true, nil)
 	}
+	if resource.Spec.Secret != nil && resource.Spec.Secret.Generated != nil {
+		confirmedSecret, confirmedResourceVersion, confirmedErr := r.generatedSecret(ctx, resource, observed, true, rotationRequested)
+		if confirmedErr != nil || confirmedSecret != observed.GetSecret() {
+			return r.statusResult(ctx, resource, ReasonConflict, "Generated OAuth2 client Secret layout could not be safely confirmed.", metav1.ConditionTrue, true, nil)
+		}
+		secretResourceVersion = confirmedResourceVersion
+	}
 	if err := r.patchStatus(ctx, resource, func(status *dexv1alpha1.DexOAuth2ClientStatus) error {
 		status.HandledRotationNonce = ""
 		if resource.Spec.Secret != nil {
@@ -178,7 +193,8 @@ func (r *DexOAuth2ClientReconciler) loadProvidedSecret(ctx context.Context, reso
 }
 
 func (r *DexOAuth2ClientReconciler) generatedSecret(ctx context.Context, resource *dexv1alpha1.DexOAuth2Client, observed *dexapi.Client, found, rotationRequested bool) (string, string, error) {
-	name := resource.Spec.Secret.Generated.SecretName
+	policy := resource.Spec.Secret.Generated
+	name := policy.SecretName
 	secret := &corev1.Secret{}
 	key := types.NamespacedName{Namespace: resource.Namespace, Name: name}
 	err := r.Get(ctx, key, secret)
@@ -186,33 +202,87 @@ func (r *DexOAuth2ClientReconciler) generatedSecret(ctx context.Context, resourc
 		if err := requireControllerOwner(secret, resource); err != nil {
 			return "", "", err
 		}
+		secretKey := policy.ClientSecretKey
+		if secretKey == "" {
+			secretKey = defaultGeneratedOAuth2ClientSecretKey
+		}
+		appliedSecretKey := secret.Annotations[generatedOAuth2ClientSecretKeyAnnotation]
+		if appliedSecretKey == "" {
+			appliedSecretKey = defaultGeneratedOAuth2ClientSecretKey
+		}
 		if rotationRequested && secret.Annotations[generatedOAuth2RotationNonceAnnotation] != resource.Spec.Secret.RotationNonce {
 			value, err := credentials.GenerateOAuth2Secret()
 			if err != nil {
 				return "", "", err
 			}
 			base := secret.DeepCopy()
-			if secret.Data == nil {
-				secret.Data = map[string][]byte{}
-			}
-			secret.Data["clientSecret"] = []byte(value)
+			secret.Data = generatedOAuth2ClientSecretData(resource, secret.Data, value)
 			if secret.Annotations == nil {
 				secret.Annotations = map[string]string{}
 			}
 			secret.Annotations[generatedOAuth2RotationNonceAnnotation] = resource.Spec.Secret.RotationNonce
+			secret.Annotations[generatedOAuth2ClientSecretKeyAnnotation] = secretKey
+			if appliedSecretKey != secretKey && policy.ClientIDKey != appliedSecretKey {
+				delete(secret.Data, appliedSecretKey)
+			}
 			if err := r.Patch(ctx, secret, client.MergeFrom(base)); err != nil {
 				return "", "", err
 			}
 			return value, secret.ResourceVersion, nil
 		}
-		value, ok := secret.Data["clientSecret"]
+		if !found && !rotationRequested && resource.Status.AppliedSecretResourceVersion != "" && secret.ResourceVersion != resource.Status.AppliedSecretResourceVersion {
+			return "", "", apierrors.NewBadRequest("generated OAuth2 client Secret changed while Dex state is absent")
+		}
+		value, ok := secret.Data[secretKey]
+		layoutMigration := false
+		if !found {
+			appliedValue, appliedOK := secret.Data[appliedSecretKey]
+			if !appliedOK || len(appliedValue) == 0 || !utf8.Valid(appliedValue) {
+				return "", "", apierrors.NewBadRequest("generated OAuth2 client Secret lacks its last applied client secret key")
+			}
+			if ok && !bytes.Equal(value, appliedValue) {
+				return "", "", apierrors.NewBadRequest("generated OAuth2 client Secret target key differs from the last applied credential")
+			}
+			value, ok = appliedValue, true
+			layoutMigration = appliedSecretKey != secretKey
+		} else if (!ok || len(value) == 0 || !utf8.Valid(value)) && appliedSecretKey != secretKey {
+			appliedValue, appliedOK := secret.Data[appliedSecretKey]
+			if appliedOK && len(appliedValue) > 0 && utf8.Valid(appliedValue) && observed.GetSecret() == string(appliedValue) {
+				value, ok = appliedValue, true
+				layoutMigration = true
+			}
+		} else if appliedSecretKey != secretKey && observed.GetSecret() == string(value) {
+			layoutMigration = true
+		}
 		if !ok || len(value) == 0 || !utf8.Valid(value) {
-			return "", "", apierrors.NewBadRequest("generated OAuth2 client Secret lacks usable clientSecret data")
+			return "", "", apierrors.NewBadRequest("generated OAuth2 client Secret lacks usable client secret data")
+		}
+		if !found {
+			return string(value), secret.ResourceVersion, nil
+		}
+		base := secret.DeepCopy()
+		secret.Data = generatedOAuth2ClientSecretData(resource, secret.Data, string(value))
+		if layoutMigration && policy.ClientIDKey != appliedSecretKey {
+			delete(secret.Data, appliedSecretKey)
+		}
+		if appliedSecretKey == secretKey || layoutMigration {
+			if secret.Annotations == nil {
+				secret.Annotations = map[string]string{}
+			}
+			secret.Annotations[generatedOAuth2ClientSecretKeyAnnotation] = secretKey
+		}
+		if !maps.EqualFunc(base.Data, secret.Data, bytes.Equal) || !maps.Equal(base.Annotations, secret.Annotations) {
+			if err := r.Patch(ctx, secret, client.MergeFrom(base)); err != nil {
+				return "", "", err
+			}
 		}
 		return string(value), secret.ResourceVersion, nil
 	}
 	if !apierrors.IsNotFound(err) {
 		return "", "", err
+	}
+	if !found && !rotationRequested && resource.Status.AppliedSecretResourceVersion != "" {
+		return "", "", apierrors.NewBadRequest("generated OAuth2 client Secret and Dex state are both absent")
 	}
 
 	value := ""
@@ -224,21 +294,35 @@ func (r *DexOAuth2ClientReconciler) generatedSecret(ctx context.Context, resourc
 			return "", "", err
 		}
 	}
-	created, err := CreateGeneratedSecret(ctx, r.Client, r.Scheme, resource, name, map[string][]byte{"clientSecret": []byte(value)})
+	secretKey := policy.ClientSecretKey
+	if secretKey == "" {
+		secretKey = defaultGeneratedOAuth2ClientSecretKey
+	}
+	annotations := map[string]string{generatedOAuth2ClientSecretKeyAnnotation: secretKey}
+	if rotationRequested {
+		annotations[generatedOAuth2RotationNonceAnnotation] = resource.Spec.Secret.RotationNonce
+	}
+	created, err := CreateGeneratedSecret(ctx, r.Client, r.Scheme, resource, name, generatedOAuth2ClientSecretData(resource, nil, value), annotations)
 	if err != nil {
 		return "", "", err
 	}
-	if rotationRequested {
-		base := created.DeepCopy()
-		if created.Annotations == nil {
-			created.Annotations = map[string]string{}
-		}
-		created.Annotations[generatedOAuth2RotationNonceAnnotation] = resource.Spec.Secret.RotationNonce
-		if err := r.Patch(ctx, created, client.MergeFrom(base)); err != nil {
-			return "", "", err
-		}
-	}
 	return value, created.ResourceVersion, nil
+}
+
+func generatedOAuth2ClientSecretData(resource *dexv1alpha1.DexOAuth2Client, data map[string][]byte, secret string) map[string][]byte {
+	policy := resource.Spec.Secret.Generated
+	secretKey := policy.ClientSecretKey
+	if secretKey == "" {
+		secretKey = defaultGeneratedOAuth2ClientSecretKey
+	}
+	if data == nil {
+		data = make(map[string][]byte, 2)
+	}
+	data[secretKey] = []byte(secret)
+	if policy.ClientIDKey != "" {
+		data[policy.ClientIDKey] = []byte(resource.Spec.ID)
+	}
+	return data
 }
 
 func desiredDexOAuth2Client(resource *dexv1alpha1.DexOAuth2Client, secret string) *dexapi.Client {

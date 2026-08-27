@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"maps"
 	"os"
 	"slices"
 	"strings"
@@ -462,6 +463,25 @@ func TestDexOAuth2Client(t *testing.T) {
 		}
 		assertRemoteOAuth2Client(t, ctx, harness, desiredOAuth2Client(managed, "provided-two"))
 
+		if notFound, err := harness.dexClient.DeleteOAuth2Client(ctx, resource.Spec.ID); err != nil || notFound {
+			t.Fatalf("delete provided-secret OAuth2 client out of band: notFound=%t err=%v", notFound, err)
+		}
+		awaitRemoteOAuth2ClientAbsence(t, ctx, harness, resource.Spec.ID)
+		secret = getSecret(t, ctx, harness.client, secret.Name)
+		secret.Data["clientSecret"] = []byte("provided-three")
+		mustUpdate(t, ctx, harness.client, secret)
+		awaitOAuth2Condition(t, ctx, harness.client, resource.Name, metav1.ConditionFalse, controller.ReasonConflict)
+		if observed := remoteOAuth2Client(t, ctx, harness, resource.Spec.ID); observed != nil {
+			t.Fatal("changed provided Secret recreated Dex without rotation")
+		}
+
+		managed = getOAuth2Client(t, ctx, harness.client, resource.Name)
+		previousGeneration = managed.Generation
+		managed.Spec.Secret.RotationNonce = "rotation-2"
+		mustUpdate(t, ctx, harness.client, managed)
+		managed = awaitReadyOAuth2ClientAfter(t, ctx, harness.client, resource.Name, previousGeneration)
+		assertRemoteOAuth2Client(t, ctx, harness, desiredOAuth2Client(managed, "provided-three"))
+
 		mustDelete(t, ctx, harness.client, managed)
 		awaitOAuth2ClientDeletion(t, ctx, harness.client, resource.Name)
 		awaitRemoteOAuth2ClientAbsence(t, ctx, harness, resource.Spec.ID)
@@ -485,12 +505,31 @@ func TestDexOAuth2Client(t *testing.T) {
 		}
 		assertRemoteOAuth2Client(t, ctx, harness, desiredOAuth2Client(managed, generatedValue))
 
-		generated.Data["clientSecret"] = []byte("manual-edit")
+		generated.Data["consumer-note"] = []byte("preserve")
 		mustUpdate(t, ctx, harness.client, generated)
+		var settled *corev1.Secret
+		eventually(t, func() (bool, error) {
+			currentSecret := getSecret(t, ctx, harness.client, resource.Spec.Secret.Generated.SecretName)
+			currentResource := getOAuth2Client(t, ctx, harness.client, resource.Name)
+			if currentResource.Status.AppliedSecretResourceVersion != currentSecret.ResourceVersion || string(currentSecret.Data["consumer-note"]) != "preserve" {
+				return false, nil
+			}
+			settled = currentSecret
+			return true, nil
+		})
+		if string(settled.Data["consumer-note"]) != "preserve" {
+			t.Fatal("generated Secret reconciliation deleted unrelated consumer data")
+		}
+
+		if notFound, err := harness.dexClient.DeleteOAuth2Client(ctx, resource.Spec.ID); err != nil || notFound {
+			t.Fatalf("delete generated OAuth2 client out of band: notFound=%t err=%v", notFound, err)
+		}
+		awaitRemoteOAuth2ClientAbsence(t, ctx, harness, resource.Spec.ID)
+		settled.Data["clientSecret"] = []byte("manual-edit")
+		mustUpdate(t, ctx, harness.client, settled)
 		awaitOAuth2Condition(t, ctx, harness.client, resource.Name, metav1.ConditionFalse, controller.ReasonConflict)
-		observed := remoteOAuth2Client(t, ctx, harness, resource.Spec.ID)
-		if observed == nil || observed.GetSecret() != generatedValue {
-			t.Fatal("manual generated-Secret edit mutated Dex without rotation")
+		if observed := remoteOAuth2Client(t, ctx, harness, resource.Spec.ID); observed != nil {
+			t.Fatal("manual generated-Secret edit recreated Dex without rotation")
 		}
 
 		managed = getOAuth2Client(t, ctx, harness.client, resource.Name)
@@ -515,7 +554,156 @@ func TestDexOAuth2Client(t *testing.T) {
 			t.Fatalf("recovered Secret controller owner = %#v", owner)
 		}
 
+		if notFound, err := harness.dexClient.DeleteOAuth2Client(ctx, resource.Spec.ID); err != nil || notFound {
+			t.Fatalf("delete generated OAuth2 client before Secret loss: notFound=%t err=%v", notFound, err)
+		}
+		awaitRemoteOAuth2ClientAbsence(t, ctx, harness, resource.Spec.ID)
+		mustDelete(t, ctx, harness.client, recovered)
+		awaitSecretAbsence(t, ctx, harness.client, resource.Spec.Secret.Generated.SecretName)
+		awaitOAuth2Condition(t, ctx, harness.client, resource.Name, metav1.ConditionFalse, controller.ReasonConflict)
+		if observed := remoteOAuth2Client(t, ctx, harness, resource.Spec.ID); observed != nil {
+			t.Fatal("simultaneous Dex and generated Secret loss recreated Dex without rotation")
+		}
+
 		managed = getOAuth2Client(t, ctx, harness.client, resource.Name)
+		previousGeneration = managed.Generation
+		managed.Spec.Secret.RotationNonce = "generated-rotation-2"
+		mustUpdate(t, ctx, harness.client, managed)
+		managed = awaitReadyOAuth2ClientAfter(t, ctx, harness.client, resource.Name, previousGeneration)
+		replaced := awaitSecretUIDChange(t, ctx, harness.client, resource.Spec.Secret.Generated.SecretName, recovered.UID)
+		assertRemoteOAuth2Client(t, ctx, harness, desiredOAuth2Client(managed, string(replaced.Data["clientSecret"])))
+
+		mustDelete(t, ctx, harness.client, managed)
+		awaitOAuth2ClientDeletion(t, ctx, harness.client, resource.Name)
+		awaitRemoteOAuth2ClientAbsence(t, ctx, harness, resource.Spec.ID)
+		awaitSecretAbsence(t, ctx, harness.client, resource.Spec.Secret.Generated.SecretName)
+	})
+
+	t.Run("generated secret custom keys", func(t *testing.T) {
+		resource := newConfidentialOAuth2Client("custom-key-client")
+		resource.Spec.Secret = &dexv1alpha1.DexOAuth2ClientSecretSpec{Generated: &dexv1alpha1.GeneratedOAuth2ClientSecretSpec{SecretName: "custom-key-client-secret"}}
+		mustCreate(t, ctx, harness.client, resource)
+		managed := awaitReadyOAuth2Client(t, ctx, harness.client, resource.Name)
+		generatedValue := string(awaitSecret(t, ctx, harness.client, resource.Spec.Secret.Generated.SecretName).Data["clientSecret"])
+
+		if notFound, err := harness.dexClient.DeleteOAuth2Client(ctx, resource.Spec.ID); err != nil || notFound {
+			t.Fatalf("delete legacy-layout OAuth2 client out of band: notFound=%t err=%v", notFound, err)
+		}
+		awaitRemoteOAuth2ClientAbsence(t, ctx, harness, resource.Spec.ID)
+		previousGeneration := managed.Generation
+		managed.Spec.Secret.Generated.ClientIDKey = "OIDC_CLIENT_ID"
+		managed.Spec.Secret.Generated.ClientSecretKey = "OIDC_CLIENT_SECRET"
+		mustUpdate(t, ctx, harness.client, managed)
+		managed = awaitReadyOAuth2ClientAfter(t, ctx, harness.client, resource.Name, previousGeneration)
+		generated := awaitSecret(t, ctx, harness.client, resource.Spec.Secret.Generated.SecretName)
+		if got := string(generated.Data["OIDC_CLIENT_ID"]); got != resource.Spec.ID {
+			t.Fatalf("generated client ID = %q, want %q", got, resource.Spec.ID)
+		}
+		if got := string(generated.Data["OIDC_CLIENT_SECRET"]); got != generatedValue {
+			t.Fatal("generated Secret layout migration rotated the client secret")
+		}
+		if _, exists := generated.Data["clientSecret"]; exists || len(generated.Data) != 2 {
+			t.Fatalf("generated Secret data keys = %v, want only custom client ID and secret keys", slices.Sorted(maps.Keys(generated.Data)))
+		}
+		assertRemoteOAuth2Client(t, ctx, harness, desiredOAuth2Client(managed, generatedValue))
+
+		delete(generated.Data, "OIDC_CLIENT_SECRET")
+		mustUpdate(t, ctx, harness.client, generated)
+		awaitOAuth2Condition(t, ctx, harness.client, resource.Name, metav1.ConditionFalse, controller.ReasonConflict)
+		observed := remoteOAuth2Client(t, ctx, harness, resource.Spec.ID)
+		if observed == nil || observed.GetSecret() != generatedValue {
+			t.Fatal("missing custom client-secret key mutated Dex without rotation")
+		}
+
+		managed = getOAuth2Client(t, ctx, harness.client, resource.Name)
+		previousGeneration = managed.Generation
+		managed.Spec.Secret.RotationNonce = "custom-key-rotation-1"
+		mustUpdate(t, ctx, harness.client, managed)
+		managed = awaitReadyOAuth2ClientAfter(t, ctx, harness.client, resource.Name, previousGeneration)
+		rotated := awaitSecretKeyValueChange(t, ctx, harness.client, resource.Spec.Secret.Generated.SecretName, "OIDC_CLIENT_SECRET", generatedValue)
+		if got := string(awaitSecret(t, ctx, harness.client, resource.Spec.Secret.Generated.SecretName).Data["OIDC_CLIENT_ID"]); got != resource.Spec.ID {
+			t.Fatalf("rotated Secret client ID = %q, want %q", got, resource.Spec.ID)
+		}
+		assertRemoteOAuth2Client(t, ctx, harness, desiredOAuth2Client(managed, rotated))
+
+		generated = awaitSecret(t, ctx, harness.client, resource.Spec.Secret.Generated.SecretName)
+		oldUID := generated.UID
+		mustDelete(t, ctx, harness.client, generated)
+		recovered := awaitSecretUIDChange(t, ctx, harness.client, resource.Spec.Secret.Generated.SecretName, oldUID)
+		if string(recovered.Data["OIDC_CLIENT_ID"]) != resource.Spec.ID || string(recovered.Data["OIDC_CLIENT_SECRET"]) != rotated {
+			t.Fatalf("recovered generated Secret data keys = %v", slices.Sorted(maps.Keys(recovered.Data)))
+		}
+
+		managed = getOAuth2Client(t, ctx, harness.client, resource.Name)
+		mustDelete(t, ctx, harness.client, managed)
+		awaitOAuth2ClientDeletion(t, ctx, harness.client, resource.Name)
+		awaitRemoteOAuth2ClientAbsence(t, ctx, harness, resource.Spec.ID)
+		awaitSecretAbsence(t, ctx, harness.client, resource.Spec.Secret.Generated.SecretName)
+	})
+
+	t.Run("generated custom-key promotion fails closed", func(t *testing.T) {
+		resource := newConfidentialOAuth2Client("custom-key-promotion-client")
+		resource.Spec.Secret = &dexv1alpha1.DexOAuth2ClientSecretSpec{Generated: &dexv1alpha1.GeneratedOAuth2ClientSecretSpec{SecretName: "custom-key-promotion-secret"}}
+		mustCreate(t, ctx, harness.client, resource)
+		managed := awaitReadyOAuth2Client(t, ctx, harness.client, resource.Name)
+		generated := awaitSecret(t, ctx, harness.client, resource.Spec.Secret.Generated.SecretName)
+		generatedValue := string(generated.Data["clientSecret"])
+		generated.Data["OIDC_CLIENT_SECRET"] = []byte("previously-unmanaged")
+		mustUpdate(t, ctx, harness.client, generated)
+		awaitOAuth2SecretResourceVersion(t, ctx, harness.client, resource.Name, generated.ResourceVersion)
+
+		if notFound, err := harness.dexClient.DeleteOAuth2Client(ctx, resource.Spec.ID); err != nil || notFound {
+			t.Fatalf("delete OAuth2 client before custom-key promotion: notFound=%t err=%v", notFound, err)
+		}
+		awaitRemoteOAuth2ClientAbsence(t, ctx, harness, resource.Spec.ID)
+		managed = getOAuth2Client(t, ctx, harness.client, resource.Name)
+		previousGeneration := managed.Generation
+		managed.Spec.Secret.Generated.ClientIDKey = "OIDC_CLIENT_ID"
+		managed.Spec.Secret.Generated.ClientSecretKey = "OIDC_CLIENT_SECRET"
+		mustUpdate(t, ctx, harness.client, managed)
+		awaitOAuth2Condition(t, ctx, harness.client, resource.Name, metav1.ConditionFalse, controller.ReasonConflict)
+		if observed := remoteOAuth2Client(t, ctx, harness, resource.Spec.ID); observed != nil {
+			t.Fatal("previously unmanaged Secret key recreated Dex without rotation")
+		}
+
+		managed = getOAuth2Client(t, ctx, harness.client, resource.Name)
+		previousGeneration = managed.Generation
+		managed.Spec.Secret.RotationNonce = "custom-key-promotion-1"
+		mustUpdate(t, ctx, harness.client, managed)
+		managed = awaitReadyOAuth2ClientAfter(t, ctx, harness.client, resource.Name, previousGeneration)
+		rotated := string(awaitSecret(t, ctx, harness.client, resource.Spec.Secret.Generated.SecretName).Data["OIDC_CLIENT_SECRET"])
+		if rotated == "previously-unmanaged" || rotated == generatedValue {
+			t.Fatal("authorized custom-key promotion did not generate a fresh credential")
+		}
+		assertRemoteOAuth2Client(t, ctx, harness, desiredOAuth2Client(managed, rotated))
+
+		mustDelete(t, ctx, harness.client, managed)
+		awaitOAuth2ClientDeletion(t, ctx, harness.client, resource.Name)
+		awaitRemoteOAuth2ClientAbsence(t, ctx, harness, resource.Spec.ID)
+		awaitSecretAbsence(t, ctx, harness.client, resource.Spec.Secret.Generated.SecretName)
+	})
+
+	t.Run("generated secret legacy-key client ID", func(t *testing.T) {
+		resource := newConfidentialOAuth2Client("legacy-key-id-client")
+		resource.Spec.Secret = &dexv1alpha1.DexOAuth2ClientSecretSpec{Generated: &dexv1alpha1.GeneratedOAuth2ClientSecretSpec{SecretName: "legacy-key-id-client-secret"}}
+		mustCreate(t, ctx, harness.client, resource)
+		managed := awaitReadyOAuth2Client(t, ctx, harness.client, resource.Name)
+		generatedValue := string(awaitSecret(t, ctx, harness.client, resource.Spec.Secret.Generated.SecretName).Data["clientSecret"])
+
+		previousGeneration := managed.Generation
+		managed.Spec.Secret.Generated.ClientIDKey = "clientSecret"
+		managed.Spec.Secret.Generated.ClientSecretKey = "OIDC_CLIENT_SECRET"
+		mustUpdate(t, ctx, harness.client, managed)
+		managed = awaitReadyOAuth2ClientAfter(t, ctx, harness.client, resource.Name, previousGeneration)
+		generated := awaitSecret(t, ctx, harness.client, resource.Spec.Secret.Generated.SecretName)
+		if got := string(generated.Data["clientSecret"]); got != resource.Spec.ID {
+			t.Fatalf("generated client ID = %q, want %q", got, resource.Spec.ID)
+		}
+		if got := string(generated.Data["OIDC_CLIENT_SECRET"]); got != generatedValue {
+			t.Fatal("generated Secret layout migration rotated the client secret")
+		}
+		assertRemoteOAuth2Client(t, ctx, harness, desiredOAuth2Client(managed, generatedValue))
+
 		mustDelete(t, ctx, harness.client, managed)
 		awaitOAuth2ClientDeletion(t, ctx, harness.client, resource.Name)
 		awaitRemoteOAuth2ClientAbsence(t, ctx, harness, resource.Spec.ID)
@@ -1113,6 +1301,10 @@ func getSecretIfPresent(t *testing.T, ctx context.Context, kube client.Client, n
 }
 
 func awaitSecretValueChange(t *testing.T, ctx context.Context, kube client.Client, name, previous string) string {
+	return awaitSecretKeyValueChange(t, ctx, kube, name, "clientSecret", previous)
+}
+
+func awaitSecretKeyValueChange(t *testing.T, ctx context.Context, kube client.Client, name, dataKey, previous string) string {
 	t.Helper()
 	var result string
 	eventually(t, func() (bool, error) {
@@ -1120,7 +1312,7 @@ func awaitSecretValueChange(t *testing.T, ctx context.Context, kube client.Clien
 		if err := kube.Get(ctx, types.NamespacedName{Namespace: "default", Name: name}, secret); err != nil {
 			return false, ignoreNotFound(err)
 		}
-		result = string(secret.Data["clientSecret"])
+		result = string(secret.Data[dataKey])
 		return result != "" && result != previous, nil
 	})
 	return result

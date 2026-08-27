@@ -202,7 +202,7 @@ func connectorSecretNames(object client.Object) []string {
 }
 
 // CreateGeneratedSecret creates an owned Secret or returns the already-owned one unchanged.
-func CreateGeneratedSecret(ctx context.Context, kube client.Client, scheme *runtime.Scheme, owner client.Object, name string, data map[string][]byte) (*corev1.Secret, error) {
+func CreateGeneratedSecret(ctx context.Context, kube client.Client, scheme *runtime.Scheme, owner client.Object, name string, data map[string][]byte, annotations map[string]string) (*corev1.Secret, error) {
 	key := types.NamespacedName{Namespace: owner.GetNamespace(), Name: name}
 	existing := &corev1.Secret{}
 	if err := kube.Get(ctx, key, existing); err == nil {
@@ -215,7 +215,7 @@ func CreateGeneratedSecret(ctx context.Context, kube client.Client, scheme *runt
 	}
 
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: owner.GetNamespace()},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: owner.GetNamespace(), Annotations: annotations},
 		Type:       corev1.SecretTypeOpaque,
 		Data:       data,
 	}

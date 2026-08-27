@@ -297,7 +297,7 @@ func (r *DexLocalUserReconciler) generatedPassword(ctx context.Context, resource
 	if err != nil {
 		return "", nil, "", err
 	}
-	created, err := CreateGeneratedSecret(ctx, r.Client, r.Scheme, resource, policy.SecretName, map[string][]byte{"password": []byte(password), "bcryptHash": hash})
+	created, err := CreateGeneratedSecret(ctx, r.Client, r.Scheme, resource, policy.SecretName, map[string][]byte{"password": []byte(password), "bcryptHash": hash}, nil)
 	if err != nil {
 		return "", nil, "", err
 	}

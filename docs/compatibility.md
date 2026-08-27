@@ -34,3 +34,9 @@ Dex also needs `DEX_SESSIONS_ENABLED=true` when its Helm-owned configuration ena
 8. Exercise the exact image/config against a restored non-production database before changing GitOps.
 
 Do not widen compatibility to a version range without repeating the API and behavioral review for every admitted version.
+
+## Local-user attribute boundary
+
+The pinned Dex storage model supports `name`, `preferredUsername`, `emailVerified`, and `groups` for local passwords, but its gRPC `api/v2.Password` exposes only `email`, `hash`, `username`, and `user_id`. `UpdatePassword` can change only the hash and username. The identity API reports `email_verified`, `groups`, and `blocked_until`, but has no create/update identity RPC; `blocked_until` is not a declarative account-disable field.
+
+Therefore `DexLocalUser` cannot safely manage full name, preferred username, verified-email state, groups, blocking, or disabling with the supported API tuple. Adding them requires a reviewed Dex change that extends the v2 protobuf, create/list/update password server mappings, storage-backed behavior, generated API module, compatibility tuple, and real login/refresh tests. The operator will not simulate these fields or write Dex storage directly.

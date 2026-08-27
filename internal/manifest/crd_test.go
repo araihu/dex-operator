@@ -118,6 +118,23 @@ func TestCRDContract(t *testing.T) {
 		if !hasValidation(secret, "has(self.providedSecretRef) != has(self.generated)") {
 			t.Fatal("confidential secret does not require exactly one source")
 		}
+		generated := property(t, secret, "generated")
+		clientIDKey := property(t, generated, "clientIDKey")
+		clientSecretKey := property(t, generated, "clientSecretKey")
+		for name, field := range map[string]*extensionsv1.JSONSchemaProps{
+			"clientIDKey":     clientIDKey,
+			"clientSecretKey": clientSecretKey,
+		} {
+			if field.Pattern != "^[-._a-zA-Z0-9]+$" || field.MaxLength == nil || *field.MaxLength != 253 {
+				t.Errorf("%s is not a valid Kubernetes Secret data key: %#v", name, field)
+			}
+		}
+		if clientSecretKey.Default == nil || string(clientSecretKey.Default.Raw) != `"clientSecret"` {
+			t.Errorf("clientSecretKey default = %v, want clientSecret", clientSecretKey.Default)
+		}
+		if !hasValidation(generated, "self.clientIDKey != self.clientSecretKey") {
+			t.Fatal("generated Secret permits client ID and client secret to use the same key")
+		}
 	})
 }
 

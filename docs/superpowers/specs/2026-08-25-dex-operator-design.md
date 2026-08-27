@@ -158,14 +158,14 @@ Spec:
 - mutable `logoURL`, `redirectURIs`, `trustedPeers`, and `allowedConnectors`.
 - confidential clients require exactly one secret mode:
   - provided same-namespace Secret reference;
-  - generated Secret with a requested name.
+- generated Secret with a requested name, optional client-ID key, and configurable client-secret key.
 - generated client secrets contain 64 characters from `A-Z`, `a-z`, `0-9`, `_`, and `-`, selected with `crypto/rand`.
 - `rotationNonce` explicitly authorizes secret rotation.
 - public clients reject all secret fields.
 
 Dex cannot update client secrets, switch public/confidential mode, or clear a previously set logo URL. Secret drift, an authorized rotation, or logo removal is reconciled through delete/recreate, producing a brief client-authentication interruption. Other mutable non-secret fields use `UpdateClient`.
 
-The generated Secret contains `clientSecret`. No client secret appears in status.
+The generated Secret contains `clientSecret` by default. `clientIDKey` optionally adds the non-secret client ID, and `clientSecretKey` changes the secret data key for direct consumer compatibility. No client secret appears in status.
 
 ### `DexConnector`
 

@@ -37,7 +37,7 @@ The operator needs no PostgreSQL, CNPG API, Dex HTTP/login, or general internet 
 
 Passwords, bcrypt hashes, OAuth2 client secrets, connector JSON, TLS keys, TOTP enrollment URIs/seeds, and WebAuthn private/public keys are prohibited from status, conditions, Events, metric labels, traces, and logs. Errors use operation names and resource identifiers only. MFA status intentionally exposes credential IDs and non-secret device metadata so removal can be declared.
 
-Generated credentials change only when a new rotation nonce authorizes it. Editing an operator-owned generated Secret fails closed. Losing generated password plaintext also fails closed until a new nonce authorizes replacement.
+Generated credentials change only when a new rotation nonce authorizes it. Moving a legacy generated OAuth2 client Secret from `clientSecret` to configured data keys preserves the Dex secret; it is layout migration, not credential rotation. Later key loss or credential edits in an operator-owned generated Secret fail closed. If a previously converged confidential client is absent from Dex, recovery requires the input Secret resource version and recorded managed key to still prove the last credential; the operator may then apply a configured layout-only patch. A changed provided Secret, promotion of divergent previously unmanaged data, or simultaneous loss of Dex and its generated Secret requires a new rotation nonce. Losing generated password plaintext also fails closed until a new nonce authorizes replacement.
 
 ## Static/dynamic ownership and deletion
 

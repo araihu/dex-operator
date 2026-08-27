@@ -21,7 +21,7 @@ CNPG backups do not contain generated password plaintext held only in Kubernetes
 
 - **CR status lost, Dex record remains:** ownership is no longer proven. Reconciliation fails with `Conflict`; inspect the external record and set `adoptExisting: true` explicitly. For local users, the requested/resolved user ID must match to preserve `sub`.
 - **Generated password Secret lost:** Dex retains only the bcrypt hash; plaintext is unrecoverable. The operator does not extract it from Dex or the database. Set a new rotation nonce to generate and apply a replacement.
-- **Generated OAuth2 client Secret lost:** do not copy it from status or logs. Set a new rotation nonce; Dex requires delete/recreate for secret replacement, causing a brief client-authentication interruption.
+- **Generated OAuth2 client Secret lost:** after ownership is proven, the operator recovers Dex's current client secret into a new owned Secret using the configured data keys. If Dex no longer has the client secret, set a new rotation nonce; replacement requires delete/recreate and causes a brief client-authentication interruption.
 - **Provided Secret lost:** restore it from its external/GitOps secret source. The operator never becomes the backup source.
 - **CNPG restored without Kubernetes state:** recreate desired CRs carefully and use explicit adoption after verifying IDs and values.
 - **Kubernetes restored without CNPG state:** the operator can recreate supported Dex records, but sessions/MFA and other Dex-owned database state are not reconstructed from CRs.

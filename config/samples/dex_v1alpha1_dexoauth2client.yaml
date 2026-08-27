@@ -15,3 +15,22 @@ spec:
     providedSecretRef:
       name: example-client-secret
       key: clientSecret
+---
+apiVersion: dex.araihu.com/v1alpha1
+kind: DexOAuth2Client
+metadata:
+  labels:
+    app.kubernetes.io/name: dex-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: dexoauth2client-generated-sample
+spec:
+  id: generated-example-client
+  public: false
+  name: Generated Example Client
+  redirectURIs:
+  - https://generated-app.example.invalid/callback
+  secret:
+    generated:
+      secretName: generated-example-client-oidc
+      clientIDKey: OIDC_CLIENT_ID
+      clientSecretKey: OIDC_CLIENT_SECRET

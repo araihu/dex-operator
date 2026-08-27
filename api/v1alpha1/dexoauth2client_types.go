@@ -21,11 +21,26 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// GeneratedOAuth2ClientSecretSpec configures a generated client secret.
+// GeneratedOAuth2ClientSecretSpec configures generated client data.
+// +kubebuilder:validation:XValidation:rule="!has(self.clientIDKey) || !has(self.clientSecretKey) || self.clientIDKey != self.clientSecretKey",message="clientIDKey and clientSecretKey must differ"
 type GeneratedOAuth2ClientSecretSpec struct {
-	// SecretName receives the generated clientSecret key.
+	// SecretName receives the generated client data.
 	// +kubebuilder:validation:MinLength=1
 	SecretName string `json:"secretName"`
+	// ClientIDKey optionally writes the non-secret client ID under this Secret data key.
+	// Omit it to preserve the legacy clientSecret-only Secret shape.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern="^[-._a-zA-Z0-9]+$"
+	// +optional
+	ClientIDKey string `json:"clientIDKey,omitempty"`
+	// ClientSecretKey writes the generated client secret under this Secret data key.
+	// +kubebuilder:default=clientSecret
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern="^[-._a-zA-Z0-9]+$"
+	// +optional
+	ClientSecretKey string `json:"clientSecretKey,omitempty"`
 }
 
 // DexOAuth2ClientSecretSpec selects provided or generated confidential material.

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	dexv1alpha1 "github.com/araihu/dex-operator/api/v1alpha1"
+	dexapi "github.com/dexidp/dex/api/v2"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -191,14 +192,17 @@ func TestSecretGeneratedOwnerConflictAndRetainDetach(t *testing.T) {
 	otherOwner.UID = types.UID("owner-two")
 	kube := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	created, err := CreateGeneratedSecret(ctx, kube, scheme, owner, "app-secret", map[string][]byte{"clientSecret": []byte("value")})
+	created, err := CreateGeneratedSecret(ctx, kube, scheme, owner, "app-secret", map[string][]byte{"clientSecret": []byte("value")}, map[string]string{"test.araihu.com/client-secret-key": "clientSecret"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if controller := metav1.GetControllerOf(created); controller == nil || controller.UID != owner.UID {
 		t.Fatalf("controller owner = %#v", controller)
 	}
-	if _, err := CreateGeneratedSecret(ctx, kube, scheme, otherOwner, "app-secret", map[string][]byte{"clientSecret": []byte("other")}); err == nil {
+	if created.Annotations["test.araihu.com/client-secret-key"] != "clientSecret" {
+		t.Fatalf("annotations = %#v", created.Annotations)
+	}
+	if _, err := CreateGeneratedSecret(ctx, kube, scheme, otherOwner, "app-secret", map[string][]byte{"clientSecret": []byte("other")}, nil); err == nil {
 		t.Fatal("CreateGeneratedSecret() accepted conflicting owner")
 	}
 	if err := DetachGeneratedSecret(ctx, kube, scheme, owner, "app-secret"); err != nil {
@@ -210,6 +214,88 @@ func TestSecretGeneratedOwnerConflictAndRetainDetach(t *testing.T) {
 	}
 	if metav1.GetControllerOf(retained) != nil {
 		t.Fatalf("retained Secret still has controller: %#v", retained.OwnerReferences)
+	}
+}
+
+func TestGeneratedOAuth2ClientSecretMigrationKeepsConfiguredClientIDKey(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	resource := &dexv1alpha1.DexOAuth2Client{
+		ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: "default", UID: types.UID("owner-one")},
+		Spec: dexv1alpha1.DexOAuth2ClientSpec{
+			ID: "app",
+			Secret: &dexv1alpha1.DexOAuth2ClientSecretSpec{Generated: &dexv1alpha1.GeneratedOAuth2ClientSecretSpec{
+				SecretName:      "app-secret",
+				ClientIDKey:     "clientSecret",
+				ClientSecretKey: "OIDC_CLIENT_SECRET",
+			}},
+		},
+	}
+	kube := fake.NewClientBuilder().WithScheme(scheme).Build()
+	if _, err := CreateGeneratedSecret(ctx, kube, scheme, resource, "app-secret", map[string][]byte{"clientSecret": []byte("secret-value")}, nil); err != nil {
+		t.Fatal(err)
+	}
+	reconciler := &DexOAuth2ClientReconciler{Client: kube, Scheme: scheme}
+	if _, _, err := reconciler.generatedSecret(ctx, resource, &dexapi.Client{Id: "app", Secret: "secret-value"}, true, false); err != nil {
+		t.Fatal(err)
+	}
+
+	secret := &corev1.Secret{}
+	if err := kube.Get(ctx, types.NamespacedName{Namespace: "default", Name: "app-secret"}, secret); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(secret.Data["clientSecret"]); got != "app" {
+		t.Fatalf("client ID = %q, want app", got)
+	}
+	if got := string(secret.Data["OIDC_CLIENT_SECRET"]); got != "secret-value" {
+		t.Fatalf("client secret = %q, want secret-value", got)
+	}
+}
+
+func TestGeneratedOAuth2ClientSecretMigrationWaitsForRemoteCreate(t *testing.T) {
+	ctx := context.Background()
+	scheme := testScheme(t)
+	resource := &dexv1alpha1.DexOAuth2Client{
+		ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: "default", UID: types.UID("owner-one")},
+		Spec: dexv1alpha1.DexOAuth2ClientSpec{ID: "app", Secret: &dexv1alpha1.DexOAuth2ClientSecretSpec{
+			Generated: &dexv1alpha1.GeneratedOAuth2ClientSecretSpec{SecretName: "app-secret", ClientSecretKey: "OIDC_CLIENT_SECRET"},
+		}},
+	}
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&dexv1alpha1.DexOAuth2Client{}).WithObjects(resource).Build()
+	created, err := CreateGeneratedSecret(ctx, kube, scheme, resource, "app-secret", map[string][]byte{"clientSecret": []byte("secret-value")}, map[string]string{generatedOAuth2ClientSecretKeyAnnotation: "clientSecret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resource.Status.AppliedSecretResourceVersion = created.ResourceVersion
+	if err := kube.Status().Update(ctx, resource); err != nil {
+		t.Fatal(err)
+	}
+	reconciler := &DexOAuth2ClientReconciler{Client: kube, Scheme: scheme}
+	value, resourceVersion, err := reconciler.generatedSecret(ctx, resource, nil, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value != "secret-value" || resourceVersion != created.ResourceVersion {
+		t.Fatalf("pre-create migration = value %q resourceVersion %q", value, resourceVersion)
+	}
+	beforeCreate := &corev1.Secret{}
+	if err := kube.Get(ctx, types.NamespacedName{Namespace: "default", Name: "app-secret"}, beforeCreate); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := beforeCreate.Data["OIDC_CLIENT_SECRET"]; exists {
+		t.Fatal("generated Secret layout changed before remote create")
+	}
+	value, resourceVersion, err = reconciler.generatedSecret(ctx, resource, &dexapi.Client{Id: "app", Secret: "secret-value"}, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value != "secret-value" || resourceVersion == created.ResourceVersion {
+		t.Fatalf("post-create migration = value %q resourceVersion %q", value, resourceVersion)
+	}
+	if retryValue, retryResourceVersion, err := reconciler.generatedSecret(ctx, resource, &dexapi.Client{Id: "app", Secret: "secret-value"}, true, false); err != nil {
+		t.Fatalf("retry after layout patch: %v", err)
+	} else if retryValue != value || retryResourceVersion != resourceVersion {
+		t.Fatalf("retry = value %q resourceVersion %q", retryValue, retryResourceVersion)
 	}
 }
 

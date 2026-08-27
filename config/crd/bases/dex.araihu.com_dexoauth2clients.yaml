@@ -95,14 +95,33 @@ spec:
                     description: Generated configures an operator-generated client
                       secret.
                     properties:
+                      clientIDKey:
+                        description: |-
+                          ClientIDKey optionally writes the non-secret client ID under this Secret data key.
+                          Omit it to preserve the legacy clientSecret-only Secret shape.
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[-._a-zA-Z0-9]+$
+                        type: string
+                      clientSecretKey:
+                        default: clientSecret
+                        description: ClientSecretKey writes the generated client secret
+                          under this Secret data key.
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[-._a-zA-Z0-9]+$
+                        type: string
                       secretName:
-                        description: SecretName receives the generated clientSecret
-                          key.
+                        description: SecretName receives the generated client data.
                         minLength: 1
                         type: string
                     required:
                     - secretName
                     type: object
+                    x-kubernetes-validations:
+                    - message: clientIDKey and clientSecretKey must differ
+                      rule: '!has(self.clientIDKey) || !has(self.clientSecretKey)
+                        || self.clientIDKey != self.clientSecretKey'
                   providedSecretRef:
                     description: ProvidedSecretRef selects an existing client secret.
                     properties:
