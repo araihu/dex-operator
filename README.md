@@ -17,7 +17,7 @@ Passwords, client secrets, connector configuration, TLS keys, TOTP seeds, and We
 
 ## Local development
 
-Prerequisites are Go 1.26, Docker, and network access for the first dependency and pinned Dex-source fetch.
+Prerequisites are Go 1.27.3, Docker, and network access for the first dependency and pinned Dex-source fetch.
 
 ```sh
 GOWORK=off go test ./... -count=1
