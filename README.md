@@ -26,7 +26,7 @@ GOWORK=off go test -race ./... -count=1
 GOWORK=off go test -tags=integration ./test/integration -count=1 -v
 ```
 
-The integration suite builds the exact reviewed Dex commit into the local-only image `dex-operator-test-dex:ab64ed778070`. The WebAuthn test uses a digest-pinned headless Chrome image. Neither image is pushed or published by this project.
+The integration suite builds the exact reviewed Dex commit into the local-only image `dex-operator-test-dex:b02ead0ba87a`. The WebAuthn test uses a digest-pinned headless Chrome image. Neither image is pushed or published by this project.
 
 Build the operator image locally with:
 

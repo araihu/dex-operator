@@ -11,7 +11,7 @@ import (
 )
 
 func TestCompatibilityClassification(t *testing.T) {
-	exact := &dexapi.VersionResp{Server: "v2.46.0-20260806171424-ab64ed77", Api: 4}
+	exact := &dexapi.VersionResp{Server: "v2.47.0-20261026150406-b02ead0b", Api: 4}
 
 	tests := []struct {
 		name         string
@@ -23,7 +23,7 @@ func TestCompatibilityClassification(t *testing.T) {
 		wantReason   string
 	}{
 		{name: "exact tuple and capabilities", version: exact, wantState: Compatible, wantReason: "Compatible"},
-		{name: "server mismatch", version: &dexapi.VersionResp{Server: "v2.45.1", Api: 4}, wantState: Incompatible, wantReason: "ServerVersionMismatch"},
+		{name: "previous reviewed server mismatch", version: &dexapi.VersionResp{Server: "v2.46.0-20260806171424-ab64ed77", Api: 4}, wantState: Incompatible, wantReason: "ServerVersionMismatch"},
 		{name: "older API mismatch", version: &dexapi.VersionResp{Server: exact.Server, Api: 3}, wantState: Incompatible, wantReason: "APIVersionMismatch"},
 		{name: "newer API mismatch", version: &dexapi.VersionResp{Server: exact.Server, Api: 5}, wantState: Incompatible, wantReason: "APIVersionMismatch"},
 		{name: "connectors disabled", version: exact, connectorErr: &CapabilityError{Capability: connectorsCapability}, wantState: Incompatible, wantReason: "ConnectorCRUDDisabled"},

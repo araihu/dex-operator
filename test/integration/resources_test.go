@@ -152,18 +152,27 @@ func TestDexLocalUser(t *testing.T) {
 		assertRemotePassword(t, ctx, harness, resource.Spec.Email, resource.Spec.Username, expectedID)
 		assertPasswordVerification(t, ctx, harness, resource.Spec.Email, "provided-password-one", true)
 
+		// Groups are owned outside this CRD; password and username updates must preserve them.
+		groups := []string{"admins", "operators"}
+		if notFound, err := harness.dexClient.UpdatePassword(ctx, &dexapi.UpdatePasswordReq{Email: resource.Spec.Email, NewGroups: groups}); err != nil || notFound {
+			t.Fatalf("set external groups: notFound=%t err=%v", notFound, err)
+		}
+
 		hashTwo := mustBcryptHash(t, "provided-password-two")
 		secret = getSecret(t, ctx, harness.client, secret.Name)
 		secret.Data["bcryptHash"] = hashTwo
 		mustUpdate(t, ctx, harness.client, secret)
 		awaitLocalUserSecretResourceVersion(t, ctx, harness.client, resource.Name, secret.ResourceVersion)
 		assertPasswordVerification(t, ctx, harness, resource.Spec.Email, "provided-password-two", true)
+		if observed := remotePassword(t, ctx, harness, resource.Spec.Email); observed == nil || !slices.Equal(observed.GetGroups(), groups) {
+			t.Fatal("password rotation changed external groups")
+		}
 
 		if notFound, err := harness.dexClient.UpdatePassword(ctx, &dexapi.UpdatePasswordReq{Email: resource.Spec.Email, NewUsername: "Drifted Username"}); err != nil || notFound {
 			t.Fatalf("inject username drift: notFound=%t err=%v", notFound, err)
 		}
 		awaitRemotePassword(t, ctx, harness, resource.Spec.Email, func(observed *dexapi.Password) bool {
-			return observed.GetUsername() == resource.Spec.Username && observed.GetUserId() == expectedID
+			return observed.GetUsername() == resource.Spec.Username && observed.GetUserId() == expectedID && slices.Equal(observed.GetGroups(), groups)
 		})
 
 		if _, err := harness.dexClient.DeletePassword(ctx, resource.Spec.Email); err != nil {
