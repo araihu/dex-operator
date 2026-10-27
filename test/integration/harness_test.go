@@ -298,7 +298,7 @@ func startDexHarnessConfigured(t *testing.T, storage dexStorage, connectorsCRUD,
 		)
 	}
 
-	container, err := testcontainers.Run(ctx, "dex-operator-test-dex:ab64ed778070", options...)
+	container, err := testcontainers.Run(ctx, "dex-operator-test-dex:b02ead0ba87a", options...)
 	cleanupOptions := []testcontainers.TerminateOption{}
 	if volumeName != "" {
 		cleanupOptions = append(cleanupOptions, testcontainers.RemoveVolumes(volumeName))
